@@ -15,6 +15,6 @@ automerge = "0.10"
 # shadow↔새내용 diff → splice 연산 변환
 similar = "2"
 # TLS 암호화
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = "0.13"
 rustls-pemfile = "2"
