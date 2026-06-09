@@ -1,0 +1,6 @@
+# 빌드 산출물 (각 머신에서 cargo build로 생성되므로 커밋하지 않음)
+/target
+
+# 에디터/OS 부산물
+*.swp
+.DS_Store
