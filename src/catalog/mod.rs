@@ -2,22 +2,31 @@
 //!
 //! The catalog tracks every known file across all peers, whether the file
 //! contents are stored locally, remotely (reference only), or both.
+//! Each owner is identified by a `NodeInfo` (node_id + human-readable node_name).
 
 pub mod store;
 
 use crate::config::SyncMode;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+
+/// Identifies a node in the network.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeInfo {
+    pub node_id: String,
+    pub node_name: String,
+}
 
 /// Where the file contents physically reside.
 #[derive(Debug, Clone)]
 pub enum FileLocation {
-    /// File exists on the local disk.
+    /// File exists on the local disk only.
     Local,
     /// Only metadata is available; original is on remote peer(s).
-    Remote { owners: Vec<String> },
+    Remote { owners: Vec<NodeInfo> },
     /// File exists locally AND is known on remote peer(s).
-    Both { owners: Vec<String> },
+    Both { owners: Vec<NodeInfo> },
 }
 
 /// A single entry in the unified catalog.
@@ -74,7 +83,7 @@ impl Catalog {
         path: String,
         size: u64,
         hash: String,
-        owner_id: String,
+        owner: NodeInfo,
         sync_mode: SyncMode,
     ) {
         let mut map = self.entries.write().unwrap();
@@ -91,13 +100,18 @@ impl Catalog {
         entry.hash = hash;
         match &mut entry.location {
             FileLocation::Remote { owners } | FileLocation::Both { owners } => {
-                if !owners.contains(&owner_id) {
-                    owners.push(owner_id);
+                if !owners.iter().any(|o| o.node_id == owner.node_id) {
+                    owners.push(owner);
+                } else {
+                    // Update name if changed
+                    if let Some(existing) = owners.iter_mut().find(|o| o.node_id == owner.node_id) {
+                        existing.node_name = owner.node_name;
+                    }
                 }
             }
             FileLocation::Local => {
                 entry.location = FileLocation::Both {
-                    owners: vec![owner_id],
+                    owners: vec![owner],
                 };
             }
         }
@@ -116,13 +130,13 @@ impl Catalog {
         entries
     }
 
-    /// Get the owners of a remote/both file (for download routing).
+    /// Get the owner node IDs of a remote/both file (for download routing).
     pub fn owners_of(&self, path: &str) -> Vec<String> {
         let map = self.entries.read().unwrap();
         match map.get(path) {
             Some(entry) => match &entry.location {
                 FileLocation::Remote { owners } | FileLocation::Both { owners } => {
-                    owners.clone()
+                    owners.iter().map(|o| o.node_id.clone()).collect()
                 }
                 FileLocation::Local => Vec::new(),
             },
@@ -150,6 +164,13 @@ impl Catalog {
 mod tests {
     use super::*;
 
+    fn node(id: &str, name: &str) -> NodeInfo {
+        NodeInfo {
+            node_id: id.to_string(),
+            node_name: name.to_string(),
+        }
+    }
+
     #[test]
     fn local_upsert() {
         let cat = Catalog::new();
@@ -171,13 +192,17 @@ mod tests {
             "big.pdf".into(),
             1_000_000,
             "def".into(),
-            "peer1".into(),
+            node("peer1", "WorkPC"),
             SyncMode::Reference,
         );
         let snap = cat.snapshot();
         assert_eq!(snap.len(), 1);
         match &snap[0].location {
-            FileLocation::Remote { owners } => assert_eq!(owners, &vec!["peer1".to_string()]),
+            FileLocation::Remote { owners } => {
+                assert_eq!(owners.len(), 1);
+                assert_eq!(owners[0].node_id, "peer1");
+                assert_eq!(owners[0].node_name, "WorkPC");
+            }
             _ => panic!("expected Remote"),
         }
     }
@@ -190,7 +215,7 @@ mod tests {
             "file.txt".into(),
             100,
             "abc".into(),
-            "peer2".into(),
+            node("peer2", "HomeServer"),
             SyncMode::FullCopy,
         );
         let snap = cat.snapshot();
@@ -204,7 +229,7 @@ mod tests {
             "big.pdf".into(),
             1_000_000,
             "def".into(),
-            "peer1".into(),
+            node("peer1", "WorkPC"),
             SyncMode::Reference,
         );
         cat.upsert_local(
@@ -220,10 +245,25 @@ mod tests {
     #[test]
     fn owners_tracking() {
         let cat = Catalog::new();
-        cat.upsert_remote("f.pdf".into(), 100, "h".into(), "p1".into(), SyncMode::Reference);
-        cat.upsert_remote("f.pdf".into(), 100, "h".into(), "p2".into(), SyncMode::Reference);
+        cat.upsert_remote("f.pdf".into(), 100, "h".into(), node("p1", "PC1"), SyncMode::Reference);
+        cat.upsert_remote("f.pdf".into(), 100, "h".into(), node("p2", "PC2"), SyncMode::Reference);
         // Duplicate owner should not add twice
-        cat.upsert_remote("f.pdf".into(), 100, "h".into(), "p1".into(), SyncMode::Reference);
+        cat.upsert_remote("f.pdf".into(), 100, "h".into(), node("p1", "PC1"), SyncMode::Reference);
         assert_eq!(cat.owners_of("f.pdf"), vec!["p1".to_string(), "p2".to_string()]);
+    }
+
+    #[test]
+    fn node_name_updated() {
+        let cat = Catalog::new();
+        cat.upsert_remote("f.pdf".into(), 100, "h".into(), node("p1", "OldName"), SyncMode::Reference);
+        cat.upsert_remote("f.pdf".into(), 100, "h".into(), node("p1", "NewName"), SyncMode::Reference);
+        let snap = cat.snapshot();
+        match &snap[0].location {
+            FileLocation::Remote { owners } => {
+                assert_eq!(owners.len(), 1);
+                assert_eq!(owners[0].node_name, "NewName");
+            }
+            _ => panic!("expected Remote"),
+        }
     }
 }

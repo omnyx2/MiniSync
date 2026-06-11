@@ -24,4 +24,6 @@ pub struct GuiBridge {
     pub config: Arc<RwLock<SyncConfig>>,
     /// Sync root folder — needed for drag-and-drop file import.
     pub root: Arc<PathBuf>,
+    /// This node's human-readable name.
+    pub node_name: String,
 }

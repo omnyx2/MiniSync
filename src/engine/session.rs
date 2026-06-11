@@ -29,6 +29,7 @@ pub fn run_peer_session(
     seen: Seen,
     docs: CrdtDocs,
     peer_id: String,
+    node_name: String,
     config: Arc<RwLock<SyncConfig>>,
     catalog: Catalog,
     engine: Option<Arc<SyncEngine>>,
@@ -44,13 +45,19 @@ pub fn run_peer_session(
         if is_server { "server" } else { "client" }
     );
 
-    // 2) Hello 교환 (blocking, no timeout yet)
-    send_msg(&mut tls, &Message::Hello(peer_id.clone()))?;
-    let remote_id = match recv_msg(&mut tls)? {
-        Some(Message::Hello(id)) => id,
+    // 2) Hello 교환 — exchange peer_id + node_name
+    send_msg(
+        &mut tls,
+        &Message::Hello {
+            peer_id: peer_id.clone(),
+            node_name: node_name.clone(),
+        },
+    )?;
+    let (remote_id, remote_name) = match recv_msg(&mut tls)? {
+        Some(Message::Hello { peer_id, node_name }) => (peer_id, node_name),
         _ => bail!("expected Hello from peer"),
     };
-    println!("[minisync] remote peer: {remote_id}");
+    println!("[minisync] remote peer: {remote_id} ({remote_name})");
 
     // 3) Set short read timeout so reader doesn't hold mutex too long
     tls.set_read_timeout(Some(Duration::from_millis(1)))?;
@@ -62,7 +69,7 @@ pub fn run_peer_session(
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
 
     // 6) Atomic 등록 (이미 같은 peer_id가 있으면 거부)
-    let (conn_id, peer_conn) = match registry.add_if_new(remote_id.clone(), tx) {
+    let (conn_id, peer_conn) = match registry.add_if_new(remote_id.clone(), remote_name.clone(), tx) {
         Some(pair) => pair,
         None => {
             println!("[minisync] already connected to {remote_id}, closing duplicate");
@@ -110,7 +117,9 @@ pub fn run_peer_session(
         &seen,
         &docs,
         &peer_id,
+        &node_name,
         &remote_id,
+        &remote_name,
         &config,
         &catalog,
         engine.as_deref(),
@@ -140,7 +149,9 @@ pub fn reader_loop_buffered(
     seen: &Seen,
     docs: &CrdtDocs,
     peer_id: &str,
+    node_name: &str,
     remote_id: &str,
+    remote_name: &str,
     config: &Arc<RwLock<SyncConfig>>,
     catalog: &Catalog,
     engine: Option<&SyncEngine>,
@@ -184,7 +195,7 @@ pub fn reader_loop_buffered(
             }
             let msg: Message = bincode::deserialize(&buf[4..4 + len])?;
             buf.drain(..4 + len);
-            handle_message(msg, peer_conn, root, seen, docs, peer_id, remote_id, config, catalog, engine)?;
+            handle_message(msg, peer_conn, root, seen, docs, peer_id, node_name, remote_id, remote_name, config, catalog, engine)?;
         }
     }
 }

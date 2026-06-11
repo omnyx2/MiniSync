@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+use super::NodeInfo;
 use crate::config::SyncMode;
 use crate::routing;
 
@@ -13,7 +14,7 @@ struct StoredEntry {
     path: String,
     size: u64,
     hash: String,
-    owners: Vec<String>,
+    owners: Vec<NodeInfo>,
     is_local: bool,
     sync_mode: SyncMode,
 }
@@ -64,12 +65,12 @@ pub fn load_catalog(root: &Path, catalog: &super::Catalog) {
         if e.is_local {
             catalog.upsert_local(e.path.clone(), e.size, e.hash.clone(), e.sync_mode);
         }
-        for owner in &e.owners {
+        for owner in e.owners {
             catalog.upsert_remote(
                 e.path.clone(),
                 e.size,
                 e.hash.clone(),
-                owner.clone(),
+                owner,
                 e.sync_mode,
             );
         }

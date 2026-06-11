@@ -278,7 +278,7 @@ impl eframe::App for GuiApp {
 
         // Central panel: file browser
         egui::CentralPanel::default().show(ctx, |ui| {
-            file_browser::file_browser_panel(ui, &entries, &self.bridge.commands_tx);
+            file_browser::file_browser_panel(ui, &entries, &self.bridge.commands_tx, &self.bridge.node_name);
         });
 
         // Drop overlay

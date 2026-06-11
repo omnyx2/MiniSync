@@ -15,7 +15,11 @@ pub fn peers_panel(ui: &mut egui::Ui, peers: &[PeerInfo]) {
         for peer in peers {
             ui.horizontal(|ui| {
                 ui.colored_label(egui::Color32::from_rgb(0, 200, 0), "[*]");
-                ui.label(&peer.remote_id);
+                if peer.remote_name.is_empty() {
+                    ui.label(&peer.remote_id);
+                } else {
+                    ui.label(format!("{} ({})", peer.remote_name, peer.remote_id));
+                }
             });
         }
     }

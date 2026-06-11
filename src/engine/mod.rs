@@ -58,6 +58,7 @@ pub enum GuiCommand {
 pub struct SyncEngine {
     pub root: Arc<PathBuf>,
     pub peer_id: String,
+    pub node_name: String,
     pub registry: Arc<PeerRegistry>,
     pub seen: Seen,
     pub docs: CrdtDocs,

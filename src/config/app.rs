@@ -25,6 +25,16 @@ pub struct AppConfig {
     /// List of peer addresses to connect to.
     #[serde(default)]
     pub peers: Vec<String>,
+    /// Human-readable name for this node (defaults to hostname).
+    #[serde(default = "default_node_name")]
+    pub node_name: String,
+}
+
+fn default_node_name() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 impl Default for AppConfig {
@@ -33,6 +43,7 @@ impl Default for AppConfig {
             sync_folder: String::new(),
             listen_addr: "0.0.0.0:9000".to_string(),
             peers: Vec::new(),
+            node_name: default_node_name(),
         }
     }
 }
@@ -121,6 +132,7 @@ mod tests {
         assert_eq!(cfg.listen_addr, "0.0.0.0:9000");
         assert!(cfg.sync_folder.is_empty());
         assert!(cfg.peers.is_empty());
+        assert!(!cfg.node_name.is_empty());
     }
 
     #[test]
@@ -129,12 +141,14 @@ mod tests {
             sync_folder: "/tmp/test".to_string(),
             listen_addr: "0.0.0.0:8000".to_string(),
             peers: vec!["10.0.0.1:9000".to_string()],
+            node_name: "MyPC".to_string(),
         };
         let s = toml::to_string_pretty(&cfg).unwrap();
         let loaded: AppConfig = toml::from_str(&s).unwrap();
         assert_eq!(loaded.sync_folder, "/tmp/test");
         assert_eq!(loaded.listen_addr, "0.0.0.0:8000");
         assert_eq!(loaded.peers, vec!["10.0.0.1:9000"]);
+        assert_eq!(loaded.node_name, "MyPC");
     }
 
     #[test]

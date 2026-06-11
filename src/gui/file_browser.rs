@@ -12,6 +12,7 @@ pub fn file_browser_panel(
     ui: &mut egui::Ui,
     entries: &[CatalogEntry],
     commands_tx: &Sender<GuiCommand>,
+    self_node_name: &str,
 ) {
     ui.heading("File Browser");
     ui.separator();
@@ -33,7 +34,7 @@ pub fn file_browser_panel(
                     ui.label(&entry.path);
                     ui.label(format_size(entry.size));
                     ui.label(mode_label(entry.sync_mode));
-                    ui.label(location_label(&entry.location));
+                    ui.label(location_label(&entry.location, self_node_name));
 
                     match &entry.location {
                         FileLocation::Remote { .. } => {
@@ -70,10 +71,23 @@ fn mode_label(mode: SyncMode) -> &'static str {
     }
 }
 
-fn location_label(loc: &FileLocation) -> &'static str {
+fn location_label(loc: &FileLocation, self_node_name: &str) -> String {
     match loc {
-        FileLocation::Local => "local",
-        FileLocation::Remote { .. } => "remote",
-        FileLocation::Both { .. } => "both",
+        FileLocation::Local => self_node_name.to_string(),
+        FileLocation::Remote { owners } => {
+            let names: Vec<&str> = owners.iter().map(|o| o.node_name.as_str()).collect();
+            if names.is_empty() {
+                "remote".to_string()
+            } else {
+                names.join(", ")
+            }
+        }
+        FileLocation::Both { owners } => {
+            let mut names = vec![self_node_name];
+            for o in owners {
+                names.push(&o.node_name);
+            }
+            names.join(", ")
+        }
     }
 }

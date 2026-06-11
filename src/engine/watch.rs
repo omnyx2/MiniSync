@@ -22,6 +22,7 @@ pub fn watch_loop(
     seen: Seen,
     docs: CrdtDocs,
     peer_id: String,
+    node_name: String,
     config: Arc<RwLock<SyncConfig>>,
     catalog: Catalog,
     engine: Option<Arc<SyncEngine>>,
@@ -89,6 +90,7 @@ pub fn watch_loop(
                                 hash: entry.hash.clone(),
                                 mtime: entry.mtime,
                                 owner_id: peer_id.clone(),
+                                owner_name: node_name.clone(),
                             };
                             println!("[watch] sending ref metadata for {rel}");
                             registry.broadcast(&Message::RefIndex(vec![ref_entry]));

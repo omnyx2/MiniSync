@@ -14,8 +14,8 @@ use crate::index::FileEntry;
 /// Everything one peer can say to the other.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
-    /// First message: exchange peer identity for conflict naming.
-    Hello(String),
+    /// First message: exchange peer identity and node name.
+    Hello { peer_id: String, node_name: String },
     /// "Here is everything I currently have." Sent right after connecting.
     Index(Vec<FileEntry>),
     /// "Please send me this file (I'm missing it or mine is older)."
@@ -43,6 +43,7 @@ pub struct RefEntry {
     pub hash: String,
     pub mtime: i64,
     pub owner_id: String,
+    pub owner_name: String,
 }
 
 /// Write one length-prefixed message.

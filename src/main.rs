@@ -46,11 +46,17 @@ fn main() -> Result<()> {
             .map(|s| s.to_string())
             .collect();
 
-        // Save to app config for next time
+        // Save to app config for next time (preserve existing node_name)
+        let existing_name = AppConfig::load().map(|c| c.node_name).unwrap_or_default();
         let app_cfg = AppConfig {
             sync_folder: filtered_args[1].to_string(),
             listen_addr: listen.clone(),
             peers: peers.clone(),
+            node_name: if existing_name.is_empty() {
+                AppConfig::default().node_name
+            } else {
+                existing_name
+            },
         };
         if let Err(e) = app_cfg.save() {
             eprintln!("[minisync] warning: could not save app config: {e}");
@@ -83,6 +89,10 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&folder_str)?;
     let folder: PathBuf = std::fs::canonicalize(&folder_str)?;
     let peer_id = generate_peer_id();
+    let node_name = AppConfig::load()
+        .map(|c| c.node_name)
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| AppConfig::default().node_name);
 
     // TLS 설정: 자체서명 인증서 생성
     let (cert, key) = net::generate_self_signed()?;
@@ -114,6 +124,7 @@ fn main() -> Result<()> {
         let engine = Arc::new(SyncEngine {
             root: Arc::clone(&root),
             peer_id: peer_id.clone(),
+            node_name: node_name.clone(),
             registry: Arc::clone(&registry),
             seen: Arc::clone(&seen),
             docs: Arc::clone(&docs),
@@ -128,25 +139,26 @@ fn main() -> Result<()> {
     };
 
     println!(
-        "[minisync] id={peer_id} listening on {listen_addr}, syncing {:?}{}",
+        "[minisync] id={peer_id} name={node_name} listening on {listen_addr}, syncing {:?}{}",
         &*root,
         if gui_mode { " (GUI mode)" } else { "" }
     );
 
     // 1) Watcher thread
     {
-        let (reg, r, s, d, pid, cfg, cat, eng) = (
+        let (reg, r, s, d, pid, nn, cfg, cat, eng) = (
             Arc::clone(&registry),
             Arc::clone(&root),
             Arc::clone(&seen),
             Arc::clone(&docs),
             peer_id.clone(),
+            node_name.clone(),
             Arc::clone(&config),
             catalog.clone(),
             engine_arc.clone(),
         );
         std::thread::spawn(move || {
-            if let Err(e) = watch_loop(reg, r, s, d, pid, cfg, cat, eng) {
+            if let Err(e) = watch_loop(reg, r, s, d, pid, nn, cfg, cat, eng) {
                 eprintln!("[watcher] stopped: {e}");
             }
         });
@@ -155,12 +167,13 @@ fn main() -> Result<()> {
     // 2) Listener thread (inbound: TLS server role)
     {
         let listener = TcpListener::bind(&listen_addr)?;
-        let (reg, r, s, d, pid, scfg, ccfg, cfg, cat, eng) = (
+        let (reg, r, s, d, pid, nn, scfg, ccfg, cfg, cat, eng) = (
             Arc::clone(&registry),
             Arc::clone(&root),
             Arc::clone(&seen),
             Arc::clone(&docs),
             peer_id.clone(),
+            node_name.clone(),
             Arc::clone(&server_cfg),
             Arc::clone(&client_cfg),
             Arc::clone(&config),
@@ -173,12 +186,13 @@ fn main() -> Result<()> {
                     Ok(stream) => {
                         let addr = stream.peer_addr().ok();
                         println!("[minisync] inbound connection from {addr:?}");
-                        let (reg2, r2, s2, d2, pid2, scfg2, ccfg2, cfg2, cat2, eng2) = (
+                        let (reg2, r2, s2, d2, pid2, nn2, scfg2, ccfg2, cfg2, cat2, eng2) = (
                             Arc::clone(&reg),
                             Arc::clone(&r),
                             Arc::clone(&s),
                             Arc::clone(&d),
                             pid.clone(),
+                            nn.clone(),
                             Arc::clone(&scfg),
                             Arc::clone(&ccfg),
                             Arc::clone(&cfg),
@@ -187,8 +201,8 @@ fn main() -> Result<()> {
                         );
                         std::thread::spawn(move || {
                             if let Err(e) = run_peer_session(
-                                stream, true, scfg2, ccfg2, reg2, r2, s2, d2, pid2, cfg2, cat2,
-                                eng2,
+                                stream, true, scfg2, ccfg2, reg2, r2, s2, d2, pid2, nn2, cfg2,
+                                cat2, eng2,
                             ) {
                                 eprintln!("[sync] inbound session ended: {e}");
                             }
@@ -202,12 +216,13 @@ fn main() -> Result<()> {
 
     // 3) Outbound connector threads (TLS client role)
     for addr in peer_addrs {
-        let (reg, r, s, d, pid, scfg, ccfg, cfg, cat, eng) = (
+        let (reg, r, s, d, pid, nn, scfg, ccfg, cfg, cat, eng) = (
             Arc::clone(&registry),
             Arc::clone(&root),
             Arc::clone(&seen),
             Arc::clone(&docs),
             peer_id.clone(),
+            node_name.clone(),
             Arc::clone(&server_cfg),
             Arc::clone(&client_cfg),
             Arc::clone(&config),
@@ -215,7 +230,7 @@ fn main() -> Result<()> {
             engine_arc.clone(),
         );
         std::thread::spawn(move || {
-            connect_with_retry(&addr, reg, r, s, d, pid, scfg, ccfg, cfg, cat, eng);
+            connect_with_retry(&addr, reg, r, s, d, pid, nn, scfg, ccfg, cfg, cat, eng);
         });
     }
 
@@ -237,6 +252,7 @@ fn main() -> Result<()> {
                 registry: Arc::clone(&registry),
                 config: Arc::clone(&config),
                 root: Arc::clone(&root),
+                node_name: node_name.clone(),
             };
             if let Err(e) = minisync::gui::run_gui(bridge) {
                 eprintln!("[gui] error: {e}");
@@ -320,6 +336,7 @@ fn connect_with_retry(
     seen: Seen,
     docs: CrdtDocs,
     peer_id: String,
+    node_name: String,
     server_cfg: Arc<ServerConfig>,
     client_cfg: Arc<ClientConfig>,
     config: Arc<RwLock<SyncConfig>>,
@@ -335,7 +352,7 @@ fn connect_with_retry(
                 println!("[minisync] connected to {addr}");
                 if let Err(e) = run_peer_session(
                     stream, false, server_cfg, client_cfg, registry, root, seen, docs, peer_id,
-                    config, catalog, engine,
+                    node_name, config, catalog, engine,
                 ) {
                     eprintln!("[sync] outbound session to {addr} ended: {e}");
                 }

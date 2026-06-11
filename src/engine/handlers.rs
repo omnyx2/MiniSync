@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::transfer::{apply_file, conflict_path, sha256_hex};
 use super::{CrdtDocs, EngineEvent, Seen, SyncEngine, DELETED_HASH};
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, NodeInfo};
 use crate::config::{SyncConfig, SyncMode};
 use crate::crdt;
 use crate::index::{
@@ -28,21 +28,27 @@ pub fn handle_message(
     seen: &Seen,
     docs: &CrdtDocs,
     peer_id: &str,
+    node_name: &str,
     remote_id: &str,
+    remote_name: &str,
     config: &Arc<RwLock<SyncConfig>>,
     catalog: &Catalog,
     engine: Option<&SyncEngine>,
 ) -> Result<()> {
+    let remote_node = NodeInfo {
+        node_id: remote_id.to_string(),
+        node_name: remote_name.to_string(),
+    };
     match msg {
-        Message::Hello(_) => {} // already handled
+        Message::Hello { .. } => {} // already handled
         Message::Index(entries) => {
-            handle_index(entries, peer_conn, root, docs, config, catalog, peer_id, remote_id, engine)?;
+            handle_index(entries, peer_conn, root, docs, config, catalog, peer_id, node_name, &remote_node, engine)?;
         }
         Message::Request(path) => {
             handle_request(&path, peer_conn, root, docs, peer_id)?;
         }
         Message::File { entry, contents } => {
-            handle_file(entry, &contents, root, seen, remote_id, peer_id, config, catalog, engine)?;
+            handle_file(entry, &contents, root, seen, &remote_node, peer_id, config, catalog, engine)?;
         }
         Message::Delete(ref path) => {
             seen.lock()
@@ -95,7 +101,8 @@ fn handle_index(
     config: &Arc<RwLock<SyncConfig>>,
     catalog: &Catalog,
     peer_id: &str,
-    remote_id: &str,
+    node_name: &str,
+    remote_node: &NodeInfo,
     engine: Option<&SyncEngine>,
 ) -> Result<()> {
     let local = build_index(root)?;
@@ -111,7 +118,7 @@ fn handle_index(
                 e.path.clone(),
                 e.size,
                 e.hash.clone(),
-                remote_id.to_string(),
+                remote_node.clone(),
                 SyncMode::Reference,
             );
             continue;
@@ -181,6 +188,7 @@ fn handle_index(
                         hash: fe.hash.clone(),
                         mtime: fe.mtime,
                         owner_id: peer_id.to_string(),
+                        owner_name: node_name.to_string(),
                     });
                 }
             }
@@ -241,7 +249,7 @@ fn handle_file(
     contents: &[u8],
     root: &Path,
     seen: &Seen,
-    remote_id: &str,
+    remote_node: &NodeInfo,
     peer_id: &str,
     config: &Arc<RwLock<SyncConfig>>,
     catalog: &Catalog,
@@ -315,7 +323,7 @@ fn handle_file(
                     let merged = merge_vv(&entry.version, &local_vv);
                     save_version(root, &entry.path, &merged);
 
-                    let conf_rel = conflict_path(&entry.path, remote_id);
+                    let conf_rel = conflict_path(&entry.path, &remote_node.node_id);
                     let conf_abs = root.join(&conf_rel);
                     if let Some(p) = conf_abs.parent() {
                         fs::create_dir_all(p)?;
@@ -343,14 +351,17 @@ fn handle_ref_index(
 ) -> Result<()> {
     for re in ref_entries {
         println!(
-            "[sync] received ref metadata: {} ({} bytes) from {}",
-            re.path, re.size, re.owner_id
+            "[sync] received ref metadata: {} ({} bytes) from {} ({})",
+            re.path, re.size, re.owner_name, re.owner_id
         );
         catalog.upsert_remote(
             re.path,
             re.size,
             re.hash,
-            re.owner_id,
+            NodeInfo {
+                node_id: re.owner_id,
+                node_name: re.owner_name,
+            },
             SyncMode::Reference,
         );
     }

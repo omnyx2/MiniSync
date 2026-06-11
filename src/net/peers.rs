@@ -19,6 +19,7 @@ pub type ConnId = u64;
 pub struct PeerConn {
     pub conn_id: ConnId,
     pub remote_id: String,
+    pub remote_name: String,
     pub writer: mpsc::Sender<Vec<u8>>,
 }
 
@@ -27,6 +28,7 @@ pub struct PeerConn {
 pub struct PeerInfo {
     pub conn_id: ConnId,
     pub remote_id: String,
+    pub remote_name: String,
 }
 
 /// 현재 연결된 모든 피어의 중앙 레지스트리.
@@ -47,6 +49,7 @@ impl PeerRegistry {
     pub fn add_if_new(
         &self,
         remote_id: String,
+        remote_name: String,
         writer: mpsc::Sender<Vec<u8>>,
     ) -> Option<(ConnId, Arc<PeerConn>)> {
         let mut peers = self.peers.write().unwrap();
@@ -62,6 +65,7 @@ impl PeerRegistry {
         let peer = Arc::new(PeerConn {
             conn_id,
             remote_id,
+            remote_name,
             writer,
         });
         peers.insert(conn_id, Arc::clone(&peer));
@@ -95,6 +99,7 @@ impl PeerRegistry {
             .map(|p| PeerInfo {
                 conn_id: p.conn_id,
                 remote_id: p.remote_id.clone(),
+                remote_name: p.remote_name.clone(),
             })
             .collect()
     }
