@@ -9,48 +9,65 @@ use anyhow::Result;
 use rcgen::generate_simple_self_signed;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig, SignatureScheme, StreamOwned};
+use rustls::{ClientConfig, Connection, DigitallySignedStruct, ServerConfig, SignatureScheme};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Server/Client TLS stream을 하나의 타입으로 통합.
-pub enum TlsStream {
-    Server(StreamOwned<rustls::ServerConnection, TcpStream>),
-    Client(StreamOwned<rustls::ClientConnection, TcpStream>),
+///
+/// 저수준 `rustls::Connection` + `TcpStream`을 직접 보유한다(`StreamOwned` 대신).
+/// 이렇게 하면 read_tls/write_tls/process_new_packets를 명시적으로 호출해
+/// 단일 스레드 논블로킹 full-duplex 펌프를 구현할 수 있다 — reader와 writer가
+/// 하나의 뮤텍스를 공유하다 교착되는 문제를 근본적으로 제거한다.
+pub struct TlsStream {
+    pub conn: Connection,
+    pub sock: TcpStream,
 }
 
 impl TlsStream {
-    pub fn set_read_timeout(&self, dur: Option<Duration>) -> std::io::Result<()> {
-        match self {
-            TlsStream::Server(s) => s.get_ref().set_read_timeout(dur),
-            TlsStream::Client(s) => s.get_ref().set_read_timeout(dur),
-        }
+    /// 소켓 논블로킹 모드 토글. Hello 교환(블로킹) 후 펌프 루프 진입 직전에 켠다.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
+        self.sock.set_nonblocking(nonblocking)
     }
 }
 
+// Hello 단계용 블로킹 Read/Write. (소켓이 블로킹 상태일 때만 사용)
 impl Read for TlsStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            TlsStream::Server(s) => s.read(buf),
-            TlsStream::Client(s) => s.read(buf),
+        loop {
+            // 이미 복호화된 평문이 있으면 반환. Ok(0)은 clean EOF(close_notify).
+            match self.conn.reader().read(buf) {
+                Ok(n) => return Ok(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e),
+            }
+            // 평문이 없으니 TLS를 더 펌프한다. 먼저 보낼 게 있으면 보낸다(handshake).
+            while self.conn.wants_write() {
+                self.conn.write_tls(&mut self.sock)?;
+            }
+            let n = self.conn.read_tls(&mut self.sock)?;
+            if n == 0 {
+                return Ok(0); // TCP EOF
+            }
+            self.conn
+                .process_new_packets()
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         }
     }
 }
 
 impl Write for TlsStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            TlsStream::Server(s) => s.write(buf),
-            TlsStream::Client(s) => s.write(buf),
-        }
+        // 평문을 rustls 송신 버퍼에 적재(소켓 I/O 없음, 블로킹 안 함).
+        self.conn.writer().write(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            TlsStream::Server(s) => s.flush(),
-            TlsStream::Client(s) => s.flush(),
+        self.conn.writer().flush()?;
+        while self.conn.wants_write() {
+            self.conn.write_tls(&mut self.sock)?;
         }
+        self.sock.flush()
     }
 }
 
@@ -87,16 +104,26 @@ pub fn client_config() -> Arc<ClientConfig> {
 // ── handshake wrappers ──────────────────────────────────────────────────────
 
 pub fn accept_tls(tcp: TcpStream, config: Arc<ServerConfig>) -> Result<TlsStream> {
-    let conn = rustls::ServerConnection::new(config)?;
-    Ok(TlsStream::Server(StreamOwned::new(conn, tcp)))
+    let mut conn = rustls::ServerConnection::new(config)?;
+    // 송신 평문 버퍼 상한 해제. 기본(~64KB)이면 큰 File 메시지를 writer에 한 번에
+    // 적재할 때 WriteZero("failed to write whole buffer")가 나서 세션이 죽는다.
+    conn.set_buffer_limit(None);
+    Ok(TlsStream {
+        conn: Connection::Server(conn),
+        sock: tcp,
+    })
 }
 
 pub fn connect_tls(tcp: TcpStream, config: Arc<ClientConfig>) -> Result<TlsStream> {
     let name = ServerName::try_from("localhost")
         .map_err(|e| anyhow::anyhow!("invalid server name: {e}"))?
         .to_owned();
-    let conn = rustls::ClientConnection::new(config, name)?;
-    Ok(TlsStream::Client(StreamOwned::new(conn, tcp)))
+    let mut conn = rustls::ClientConnection::new(config, name)?;
+    conn.set_buffer_limit(None);
+    Ok(TlsStream {
+        conn: Connection::Client(conn),
+        sock: tcp,
+    })
 }
 
 // ── NoVerifier (P2P: accept any certificate) ────────────────────────────────

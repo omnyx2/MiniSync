@@ -150,7 +150,12 @@ fn handle_crdt_local_edit(
     let content = fs::read_to_string(root.join(rel))?;
     let shadow = crdt::read_shadow(root, rel);
 
-    if content == shadow {
+    // shadow가 이미 존재하고 내용이 같으면 진짜 "변화 없음" → skip.
+    // shadow가 없으면(처음 보는 파일) 빈 파일이어도 초기 CrdtSync를 보내야 한다.
+    // (read_shadow는 없는 shadow에 ""를 돌려주므로, 빈 파일이면 content==shadow가
+    //  되어 동기화가 누락되는 버그를 막는다.)
+    let shadow_exists = routing::shadow_path(root, rel).exists();
+    if shadow_exists && content == shadow {
         seen.lock()
             .unwrap()
             .insert(rel.to_string(), entry.hash.clone());

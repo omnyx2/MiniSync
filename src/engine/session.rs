@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use super::handlers::handle_message;
@@ -59,16 +59,10 @@ pub fn run_peer_session(
     };
     println!("[minisync] remote peer: {remote_id} ({remote_name})");
 
-    // 3) Set short read timeout so reader doesn't hold mutex too long
-    tls.set_read_timeout(Some(Duration::from_millis(1)))?;
-
-    // 4) Wrap in Arc<Mutex> for sharing between reader and writer
-    let stream = Arc::new(Mutex::new(tls));
-
-    // 5) Create channel for writer
+    // 3) Channel for outbound messages (broadcast/unicast feed this; pump drains it)
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
 
-    // 6) Atomic 등록 (이미 같은 peer_id가 있으면 거부)
+    // 4) Atomic 등록 (이미 같은 peer_id가 있으면 거부)
     let (conn_id, peer_conn) = match registry.add_if_new(remote_id.clone(), remote_name.clone(), tx) {
         Some(pair) => pair,
         None => {
@@ -88,30 +82,18 @@ pub fn run_peer_session(
         });
     }
 
-    // 7) Writer thread: channel → TLS write
-    let stream_w = Arc::clone(&stream);
-    let remote_id_w = remote_id.clone();
-    let writer_handle = std::thread::spawn(move || {
-        for bytes in rx {
-            let mut guard = stream_w.lock().unwrap();
-            if let Err(e) = guard.write_all(&bytes) {
-                eprintln!("[writer] {remote_id_w}: {e}");
-                break;
-            }
-            if let Err(e) = guard.flush() {
-                eprintln!("[writer] {remote_id_w} flush: {e}");
-                break;
-            }
-        }
-    });
-
-    // 8) Index 전송 (via channel)
+    // 5) Index 전송 (큐에 적재; 펌프가 내보냄)
     let entries: Vec<FileEntry> = build_index(&root)?.into_values().collect();
     send_to_peer(&peer_conn, &Message::Index(entries))?;
 
-    // 9) Reader loop (manual buffering with timeout)
-    let result = reader_loop_buffered(
-        &stream,
+    // 6) 단일 스레드 논블로킹 full-duplex 펌프.
+    //    reader/writer가 하나의 뮤텍스를 공유하던 구조를 없애 교착을 제거한다:
+    //    매 루프마다 (보낼 것 보내고) + (받을 것 받으므로) 한 방향의 백프레셔가
+    //    다른 방향을 굶기지 않는다.
+    tls.set_nonblocking(true)?;
+    let result = pump_loop(
+        &mut tls,
+        &rx,
         &peer_conn,
         &root,
         &seen,
@@ -125,7 +107,7 @@ pub fn run_peer_session(
         engine.as_deref(),
     );
 
-    // 10) 정리: registry에서 제거 → Sender drop → writer thread 종료
+    // 7) 정리: registry에서 제거
     registry.remove(conn_id);
     if let Some(eng) = &engine {
         eng.notify_gui(EngineEvent::PeerDisconnected {
@@ -133,7 +115,6 @@ pub fn run_peer_session(
         });
     }
     drop(peer_conn);
-    let _ = writer_handle.join();
     println!(
         "[minisync] peer {remote_id} (conn_id={conn_id}) disconnected, peers={}",
         registry.count()
@@ -141,9 +122,16 @@ pub fn run_peer_session(
     result
 }
 
-/// Manual buffered reader: lock → read (with timeout) → unlock → parse.
-pub fn reader_loop_buffered(
-    stream: &Arc<Mutex<TlsStream>>,
+/// 단일 스레드 full-duplex 펌프 (논블로킹 소켓).
+///
+/// 매 반복: (a) 아웃바운드 채널 → rustls 송신버퍼, (b) rustls → 소켓 flush,
+/// (c) 소켓 → rustls 읽기, (d) 평문 디코드, (e) 프레임 파싱·디스패치.
+/// 어느 단계도 소켓에서 무한정 블로킹하지 않으므로, 큰 파일 동시 전송 시에도
+/// 송신 백프레셔가 수신을 막지 않는다.
+#[allow(clippy::too_many_arguments)]
+fn pump_loop(
+    tls: &mut TlsStream,
+    rx: &mpsc::Receiver<Vec<u8>>,
     peer_conn: &Arc<PeerConn>,
     root: &Path,
     seen: &Seen,
@@ -156,46 +144,80 @@ pub fn reader_loop_buffered(
     catalog: &Catalog,
     engine: Option<&SyncEngine>,
 ) -> Result<()> {
-    let mut buf = Vec::new();
+    let mut inbuf = Vec::new();
     let mut tmp = [0u8; 16384];
 
     loop {
-        // 1) Lock → read → unlock (lock held only during read, max ~1ms)
-        let read_result = {
-            let mut guard = stream.lock().unwrap();
-            guard.read(&mut tmp)
-        }; // lock released immediately
+        let mut did_work = false;
 
-        match read_result {
+        // (a) 아웃바운드 메시지를 rustls 송신 버퍼에 적재 (소켓 I/O 없음)
+        loop {
+            match rx.try_recv() {
+                Ok(bytes) => {
+                    tls.conn.writer().write_all(&bytes)?;
+                    did_work = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(()), // 모든 sender drop
+            }
+        }
+
+        // (b) 송신 버퍼를 소켓으로 flush (논블로킹; WouldBlock이면 다음 기회에)
+        while tls.conn.wants_write() {
+            match tls.conn.write_tls(&mut tls.sock) {
+                Ok(0) => break,
+                Ok(_) => did_work = true,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        // (c) 소켓에서 TLS 레코드 읽기 (논블로킹)
+        match tls.conn.read_tls(&mut tls.sock) {
             Ok(0) => {
                 println!("[sync] peer {remote_id} disconnected (EOF)");
                 return Ok(());
             }
-            Ok(n) => {
-                buf.extend_from_slice(&tmp[..n]);
+            Ok(_) => {
+                tls.conn.process_new_packets()?;
+                did_work = true;
             }
-            Err(ref e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                // No data — sleep without lock to let writer thread work
-                std::thread::sleep(Duration::from_millis(20));
-                continue;
-            }
-            Err(e) => {
-                return Err(e.into());
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        // (d) 복호화된 평문을 inbuf로 흡수
+        loop {
+            match tls.conn.reader().read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => {
+                    inbuf.extend_from_slice(&tmp[..n]);
+                    did_work = true;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e.into()),
             }
         }
 
-        // 2) Parse complete messages from buffer
-        while buf.len() >= 4 {
-            let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if buf.len() < 4 + len {
-                break; // incomplete message, wait for more data
+        // (e) 완성된 프레임 파싱·디스패치
+        while inbuf.len() >= 4 {
+            let len = u32::from_be_bytes([inbuf[0], inbuf[1], inbuf[2], inbuf[3]]) as usize;
+            if inbuf.len() < 4 + len {
+                break; // 불완전 — 더 받을 때까지 대기
             }
-            let msg: Message = bincode::deserialize(&buf[4..4 + len])?;
-            buf.drain(..4 + len);
-            handle_message(msg, peer_conn, root, seen, docs, peer_id, node_name, remote_id, remote_name, config, catalog, engine)?;
+            let msg: Message = bincode::deserialize(&inbuf[4..4 + len])?;
+            inbuf.drain(..4 + len);
+            handle_message(
+                msg, peer_conn, root, seen, docs, peer_id, node_name, remote_id, remote_name,
+                config, catalog, engine,
+            )?;
+        }
+
+        // (f) 할 일이 없으면 잠깐 쉰다. 보낼 게 막혀있으면 더 짧게.
+        if !did_work {
+            let nap = if tls.conn.wants_write() { 1 } else { 10 };
+            std::thread::sleep(Duration::from_millis(nap));
         }
     }
 }
