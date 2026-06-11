@@ -18,6 +18,9 @@ anyhow = "1"
 automerge = "0.10"
 # shadow↔새내용 diff → splice 연산 변환
 similar = "2"
+# UDP 자동 발견: SO_REUSEPORT(socket2) + 인터페이스별 broadcast 주소(if-addrs)
+socket2 = { version = "0.5", features = ["all"] }
+if-addrs = "0.13"
 # TLS 암호화
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = "0.13"

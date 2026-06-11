@@ -91,6 +91,15 @@ impl PeerRegistry {
         self.peers.read().unwrap().len()
     }
 
+    /// 주어진 remote_id의 피어가 이미 연결되어 있는지 확인 (auto-discovery용).
+    pub fn has_peer(&self, remote_id: &str) -> bool {
+        self.peers
+            .read()
+            .unwrap()
+            .values()
+            .any(|p| p.remote_id == remote_id)
+    }
+
     /// Get a snapshot of all connected peers (for GUI).
     pub fn peer_list(&self) -> Vec<PeerInfo> {
         let peers = self.peers.read().unwrap();

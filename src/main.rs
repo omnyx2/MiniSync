@@ -23,6 +23,7 @@ use minisync::engine::watch::watch_loop;
 use minisync::engine::GuiCommand;
 use minisync::engine::{CrdtDocs, Seen, SyncEngine};
 use minisync::net;
+use minisync::net::discovery;
 use minisync::net::peers::PeerRegistry;
 
 fn main() -> Result<()> {
@@ -42,7 +43,6 @@ fn main() -> Result<()> {
         let listen = filtered_args[2].to_string();
         let peers: Vec<String> = filtered_args[3..]
             .iter()
-            .filter(|a| **a > listen.as_str())
             .map(|s| s.to_string())
             .collect();
 
@@ -74,12 +74,7 @@ fn main() -> Result<()> {
             AppConfig::config_path().display()
         );
         let listen = app_cfg.listen_addr.clone();
-        let peers: Vec<String> = app_cfg
-            .peers
-            .iter()
-            .filter(|a| a.as_str() > listen.as_str())
-            .cloned()
-            .collect();
+        let peers: Vec<String> = app_cfg.peers.clone();
         (app_cfg.sync_folder, listen, peers)
     } else {
         print_usage(&filtered_args[0]);
@@ -143,6 +138,7 @@ fn main() -> Result<()> {
         &*root,
         if gui_mode { " (GUI mode)" } else { "" }
     );
+    println!("[minisync] peers to connect: {:?}", &peer_addrs);
 
     // 1) Watcher thread
     {
@@ -234,7 +230,45 @@ fn main() -> Result<()> {
         });
     }
 
-    // 4) GUI or headless
+    // 4) UDP auto-discovery: beacon broadcaster + listener (LAN peer discovery)
+    let listen_port: Option<u16> = listen_addr.rsplit(':').next().and_then(|p| p.parse().ok());
+    match listen_port {
+        Some(port) => {
+            // 4a) Beacon broadcaster
+            {
+                let (pid, nn) = (peer_id.clone(), node_name.clone());
+                std::thread::spawn(move || {
+                    discovery::beacon_broadcast_loop(pid, nn, port);
+                });
+            }
+            // 4b) Beacon listener (auto-connects to discovered peers)
+            {
+                let (reg, r, s, d, pid, nn, scfg, ccfg, cfg, cat, eng) = (
+                    Arc::clone(&registry),
+                    Arc::clone(&root),
+                    Arc::clone(&seen),
+                    Arc::clone(&docs),
+                    peer_id.clone(),
+                    node_name.clone(),
+                    Arc::clone(&server_cfg),
+                    Arc::clone(&client_cfg),
+                    Arc::clone(&config),
+                    catalog.clone(),
+                    engine_arc.clone(),
+                );
+                std::thread::spawn(move || {
+                    discovery::beacon_listen_loop(
+                        pid, reg, r, s, d, nn, scfg, ccfg, cfg, cat, eng, connect_with_retry,
+                    );
+                });
+            }
+        }
+        None => eprintln!(
+            "[discovery] could not parse port from listen_addr '{listen_addr}', auto-discovery disabled"
+        ),
+    }
+
+    // 5) GUI or headless
     if gui_mode {
         #[cfg(feature = "gui")]
         {
