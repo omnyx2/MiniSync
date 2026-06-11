@@ -6,9 +6,7 @@
 
 use anyhow::Result;
 use rustls::{ClientConfig, ServerConfig};
-use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
-use std::hash::{BuildHasher, Hasher};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -46,8 +44,10 @@ fn main() -> Result<()> {
             .map(|s| s.to_string())
             .collect();
 
-        // Save to app config for next time (preserve existing node_name)
-        let existing_name = AppConfig::load().map(|c| c.node_name).unwrap_or_default();
+        // Save to app config for next time (preserve existing node_name + peer_id)
+        let existing = AppConfig::load();
+        let existing_name = existing.as_ref().map(|c| c.node_name.clone()).unwrap_or_default();
+        let existing_peer_id = existing.as_ref().map(|c| c.peer_id.clone()).unwrap_or_default();
         let app_cfg = AppConfig {
             sync_folder: filtered_args[1].to_string(),
             listen_addr: listen.clone(),
@@ -57,6 +57,7 @@ fn main() -> Result<()> {
             } else {
                 existing_name
             },
+            peer_id: existing_peer_id,
         };
         if let Err(e) = app_cfg.save() {
             eprintln!("[minisync] warning: could not save app config: {e}");
@@ -83,7 +84,9 @@ fn main() -> Result<()> {
 
     std::fs::create_dir_all(&folder_str)?;
     let folder: PathBuf = std::fs::canonicalize(&folder_str)?;
-    let peer_id = generate_peer_id();
+    // 컴퓨터별로 고정된 peer_id(app.toml에 영속). 재시작해도 유지되어
+    // PID 기반 id가 만들던 좀비 피어 연결 문제를 없앤다.
+    let peer_id = AppConfig::load_or_create_peer_id();
     let node_name = AppConfig::load()
         .map(|c| c.node_name)
         .filter(|n| !n.is_empty())
@@ -422,11 +425,4 @@ fn connect_with_retry(
             }
         }
     }
-}
-
-/// 인스턴스별 고유 ID (8자리 hex).
-fn generate_peer_id() -> String {
-    let mut h = RandomState::new().build_hasher();
-    h.write_u32(std::process::id());
-    format!("{:08x}", h.finish() as u32)
 }

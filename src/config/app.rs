@@ -28,6 +28,11 @@ pub struct AppConfig {
     /// Human-readable name for this node (defaults to hostname).
     #[serde(default = "default_node_name")]
     pub node_name: String,
+    /// Stable per-machine peer id (8-char hex). Generated once and persisted,
+    /// so it no longer changes on every restart (PID-based ids caused zombie
+    /// peer connections). Empty until first generated.
+    #[serde(default)]
+    pub peer_id: String,
 }
 
 fn default_node_name() -> String {
@@ -44,8 +49,22 @@ impl Default for AppConfig {
             listen_addr: "0.0.0.0:9000".to_string(),
             peers: Vec::new(),
             node_name: default_node_name(),
+            peer_id: String::new(),
         }
     }
+}
+
+/// 새 랜덤 8자리 hex id 생성(최초 1회용). RandomState는 매 프로세스 무작위
+/// 시드라, 시간까지 섞어 한 번 만든 뒤 파일에 저장해 영구 고정한다.
+fn new_random_id() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = RandomState::new().build_hasher();
+    h.write_u32(std::process::id());
+    if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        h.write_u128(d.as_nanos());
+    }
+    format!("{:08x}", h.finish() as u32)
 }
 
 impl AppConfig {
@@ -81,6 +100,20 @@ impl AppConfig {
             toml::to_string_pretty(self).map_err(|e| format!("Failed to serialize: {e}"))?;
         fs::write(&path, content).map_err(|e| format!("Failed to write config: {e}"))?;
         Ok(())
+    }
+
+    /// This machine's stable peer id. Loads the persisted one, or generates a
+    /// random id on first use and writes it back so it survives restarts.
+    /// Preserves any other existing config fields.
+    pub fn load_or_create_peer_id() -> String {
+        let mut cfg = Self::load().unwrap_or_default();
+        if cfg.peer_id.trim().is_empty() {
+            cfg.peer_id = new_random_id();
+            if let Err(e) = cfg.save() {
+                eprintln!("[minisync] warning: could not persist peer_id: {e}");
+            }
+        }
+        cfg.peer_id
     }
 
     /// Check if the config has a valid sync folder set.
@@ -142,6 +175,7 @@ mod tests {
             listen_addr: "0.0.0.0:8000".to_string(),
             peers: vec!["10.0.0.1:9000".to_string()],
             node_name: "MyPC".to_string(),
+            peer_id: "a1b2c3d4".to_string(),
         };
         let s = toml::to_string_pretty(&cfg).unwrap();
         let loaded: AppConfig = toml::from_str(&s).unwrap();
@@ -149,6 +183,20 @@ mod tests {
         assert_eq!(loaded.listen_addr, "0.0.0.0:8000");
         assert_eq!(loaded.peers, vec!["10.0.0.1:9000"]);
         assert_eq!(loaded.node_name, "MyPC");
+        assert_eq!(loaded.peer_id, "a1b2c3d4");
+    }
+
+    #[test]
+    fn peer_id_default_empty_and_random_is_8hex() {
+        // 기본값은 빈 문자열(아직 미생성).
+        assert!(AppConfig::default().peer_id.is_empty());
+        // 생성된 id는 8자리 hex.
+        let id = new_random_id();
+        assert_eq!(id.len(), 8);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        // 옛 config(peer_id 키 없음)도 default로 역직렬화돼야 한다.
+        let old: AppConfig = toml::from_str("sync_folder = \"/x\"\nlisten_addr = \"0.0.0.0:9000\"").unwrap();
+        assert!(old.peer_id.is_empty());
     }
 
     #[test]
