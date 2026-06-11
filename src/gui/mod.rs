@@ -211,17 +211,18 @@ impl eframe::App for GuiApp {
                 }
                 if ui.small_button("Change...").on_hover_text("Choose a different sync folder (requires restart)").clicked() {
                     if let Some(new_path) = pick_folder(&self.bridge.root) {
-                        self.status_message = format!(
-                            "Restart minisync with new folder: {}",
-                            new_path.display()
-                        );
-                        // Save the chosen path to .minisync/last_root so the user
-                        // can see it, but a real folder change requires restart.
-                        let info_path = self.bridge.root.join(".minisync").join("next_root.txt");
-                        if let Some(p) = info_path.parent() {
-                            let _ = std::fs::create_dir_all(p);
+                        // Save new folder to global app config
+                        let mut app_cfg = crate::config::app::AppConfig::load()
+                            .unwrap_or_default();
+                        app_cfg.sync_folder = new_path.display().to_string();
+                        if let Err(e) = app_cfg.save() {
+                            self.status_message = format!("Failed to save settings: {e}");
+                        } else {
+                            self.status_message = format!(
+                                "Saved! Restart minisync to use: {}",
+                                new_path.display()
+                            );
                         }
-                        let _ = std::fs::write(&info_path, new_path.display().to_string());
                     }
                 }
             });

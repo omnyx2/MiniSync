@@ -1,12 +1,8 @@
 //! minisync — a tiny peer-to-peer folder sync (full mesh P2P + TLS).
 //!
 //! Usage:
-//!   minisync <folder> <listen_addr> [peer1_addr] [peer2_addr] ...
-//!   minisync --gui <folder> <listen_addr> [peer1_addr] [peer2_addr] ...
-//!
-//! 모든 노드가 동등: listen + connect 동시 수행.
-//! 어떤 노드가 죽어도 나머지끼리 계속 동기화.
-//! 통신은 rustls TLS로 암호화 (자체서명 인증서).
+//!   minisync [--gui] <folder> <listen_addr> [peer1_addr] ...
+//!   minisync --gui                (uses saved settings from ~/.config/minisync/app.toml)
 
 use anyhow::Result;
 use rustls::{ClientConfig, ServerConfig};
@@ -19,6 +15,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use minisync::catalog::Catalog;
+use minisync::config::app::AppConfig;
 use minisync::config::SyncConfig;
 use minisync::engine::session::run_peer_session;
 use minisync::engine::watch::watch_loop;
@@ -33,33 +30,58 @@ fn main() -> Result<()> {
 
     // Parse --gui flag
     let gui_mode = args.iter().any(|a| a == "--gui");
-    let filtered_args: Vec<&str> = args.iter().map(|s| s.as_str()).filter(|a| *a != "--gui").collect();
-
-    if filtered_args.len() < 3 {
-        eprintln!("minisync — tiny peer-to-peer folder sync (full mesh + TLS)\n");
-        eprintln!("Usage:");
-        eprintln!(
-            "  {} [--gui] <folder> <listen_addr> [peer1_addr] [peer2_addr] ...",
-            filtered_args[0]
-        );
-        eprintln!();
-        eprintln!("Example (3 nodes):");
-        eprintln!(
-            "  {} ./data 0.0.0.0:9000 10.0.0.2:9001 10.0.0.3:9002",
-            filtered_args[0]
-        );
-        eprintln!("  {} --gui ./data 0.0.0.0:9000 10.0.0.2:9001", filtered_args[0]);
-        std::process::exit(1);
-    }
-
-    let listen_addr = filtered_args[2].to_string();
-    let peer_addrs: Vec<String> = filtered_args[3..]
+    let filtered_args: Vec<&str> = args
         .iter()
-        .filter(|a| **a > listen_addr.as_str())
-        .map(|s| s.to_string())
+        .map(|s| s.as_str())
+        .filter(|a| *a != "--gui")
         .collect();
-    std::fs::create_dir_all(filtered_args[1])?;
-    let folder: PathBuf = std::fs::canonicalize(filtered_args[1])?;
+
+    // Resolve settings: CLI args > saved AppConfig > show usage
+    let (folder_str, listen_addr, peer_addrs) = if filtered_args.len() >= 3 {
+        // CLI args provided
+        let listen = filtered_args[2].to_string();
+        let peers: Vec<String> = filtered_args[3..]
+            .iter()
+            .filter(|a| **a > listen.as_str())
+            .map(|s| s.to_string())
+            .collect();
+
+        // Save to app config for next time
+        let app_cfg = AppConfig {
+            sync_folder: filtered_args[1].to_string(),
+            listen_addr: listen.clone(),
+            peers: peers.clone(),
+        };
+        if let Err(e) = app_cfg.save() {
+            eprintln!("[minisync] warning: could not save app config: {e}");
+        }
+
+        (filtered_args[1].to_string(), listen, peers)
+    } else if let Some(app_cfg) = AppConfig::load() {
+        // No CLI args — use saved config
+        if app_cfg.sync_folder.is_empty() {
+            print_usage(&filtered_args[0]);
+            std::process::exit(1);
+        }
+        println!(
+            "[minisync] loaded settings from {}",
+            AppConfig::config_path().display()
+        );
+        let listen = app_cfg.listen_addr.clone();
+        let peers: Vec<String> = app_cfg
+            .peers
+            .iter()
+            .filter(|a| a.as_str() > listen.as_str())
+            .cloned()
+            .collect();
+        (app_cfg.sync_folder, listen, peers)
+    } else {
+        print_usage(&filtered_args[0]);
+        std::process::exit(1);
+    };
+
+    std::fs::create_dir_all(&folder_str)?;
+    let folder: PathBuf = std::fs::canonicalize(&folder_str)?;
     let peer_id = generate_peer_id();
 
     // TLS 설정: 자체서명 인증서 생성
@@ -73,7 +95,7 @@ fn main() -> Result<()> {
     let seen: Seen = Arc::new(Mutex::new(HashMap::new()));
     let docs: CrdtDocs = Arc::new(Mutex::new(HashMap::new()));
 
-    // Load sync configuration
+    // Load per-folder sync configuration
     let config = Arc::new(RwLock::new(SyncConfig::load(&root)));
     println!(
         "[minisync] config loaded: default_mode={:?}",
@@ -222,7 +244,9 @@ fn main() -> Result<()> {
         }
         #[cfg(not(feature = "gui"))]
         {
-            eprintln!("[minisync] --gui requires the 'gui' feature. Build with: cargo build --features gui");
+            eprintln!(
+                "[minisync] --gui requires the 'gui' feature. Build with: cargo build --features gui"
+            );
             std::process::exit(1);
         }
     } else {
@@ -234,6 +258,20 @@ fn main() -> Result<()> {
 
     #[allow(unreachable_code)]
     Ok(())
+}
+
+fn print_usage(prog: &str) {
+    eprintln!("minisync — tiny peer-to-peer folder sync (full mesh + TLS)\n");
+    eprintln!("Usage:");
+    eprintln!("  {prog} [--gui] <folder> <listen_addr> [peer1_addr] ...");
+    eprintln!("  {prog} --gui                (uses saved settings)");
+    eprintln!();
+    eprintln!("Settings are saved to: {}", AppConfig::config_path().display());
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  {prog} ./data 0.0.0.0:9000 10.0.0.2:9001 10.0.0.3:9002");
+    eprintln!("  {prog} --gui ~/Sync 0.0.0.0:9000");
+    eprintln!("  {prog} --gui   # reuse last settings");
 }
 
 /// Process GUI commands in a dedicated thread.
@@ -270,7 +308,6 @@ fn gui_command_loop(engine: &SyncEngine, root: &std::path::Path) {
             }
             GuiCommand::Rescan => {
                 println!("[gui] rescan requested");
-                // Rescan will be triggered by the next watch cycle
             }
         }
     }

@@ -13,6 +13,7 @@
 //! mode = "full_copy"
 //! ```
 
+pub mod app;
 pub mod rules;
 
 use serde::{Deserialize, Serialize};
