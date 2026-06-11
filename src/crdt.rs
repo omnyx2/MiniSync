@@ -7,7 +7,8 @@
 //!
 //! diff에는 `similar` crate(문자 단위), CRDT에는 `automerge` crate를 사용한다.
 
-use automerge::{AutoCommit, ObjType, ReadDoc, transaction::Transactable, ROOT};
+use automerge::transaction::CommitOptions;
+use automerge::{ActorId, AutoCommit, ObjType, ReadDoc, transaction::Transactable, ROOT};
 use similar::DiffOp;
 use std::fs;
 use std::path::Path;
@@ -17,14 +18,31 @@ use crate::routing;
 /// Automerge 문서 안에서 텍스트 객체를 가리키는 키 이름.
 const TEXT_KEY: &str = "text";
 
+/// genesis(빈 text 객체 생성) 연산에만 쓰는 고정 actor.
+/// 모든 피어/모든 파일에서 동일하므로, 두 노드가 같은 파일을 **독립적으로**
+/// 생성해도 genesis change가 바이트 단위로 동일(같은 ChangeHash)해진다.
+/// → `text` 객체의 ObjId가 같아져 두 문서가 깔끔히 merge된다.
+const GENESIS_ACTOR: [u8; 16] = [0u8; 16];
+
+/// genesis 골격: 고정 actor + 고정 timestamp(0)로 빈 text 객체만 만든 문서.
+/// 어떤 피어에서 호출해도 직렬화 결과가 동일하다(merge 시 dedup됨).
+fn new_doc_skeleton() -> AutoCommit {
+    let mut doc = AutoCommit::new().with_actor(ActorId::from(GENESIS_ACTOR));
+    doc.put_object(ROOT, TEXT_KEY, ObjType::Text)
+        .expect("genesis put_object");
+    // 고정 시각으로 커밋 → 피어 간 genesis change 해시가 일치.
+    doc.commit_with(CommitOptions::default().with_time(0));
+    doc
+}
+
 /// 새 Automerge 문서를 만들고 `initial` 내용으로 초기화한다.
-/// 반환: (doc, text_object_id)
+/// genesis는 공유 골격에서 시작하고, 실제 편집은 피어별 고유 actor로 기록한다.
 pub fn new_doc(initial: &str) -> AutoCommit {
-    let mut doc = AutoCommit::new();
-    let text_id = doc
-        .put_object(ROOT, TEXT_KEY, ObjType::Text)
-        .expect("put_object on new doc");
+    let mut doc = new_doc_skeleton();
+    // genesis 이후의 모든 편집은 이 노드 고유 actor로 — 동시편집이 충돌 없이 병합되도록.
+    doc.set_actor(ActorId::random());
     if !initial.is_empty() {
+        let text_id = text_id(&doc);
         doc.splice_text(&text_id, 0, 0, initial)
             .expect("initial splice_text");
     }
@@ -245,6 +263,67 @@ mod tests {
 
         // 수렴: 양쪽 동일.
         assert_eq!(text1, text2, "must converge");
+    }
+
+    /// genesis 골격은 모든 호출에서 바이트 동일해야 한다(피어 간 dedup 전제).
+    #[test]
+    fn genesis_skeleton_is_deterministic() {
+        let mut a = new_doc_skeleton();
+        let mut b = new_doc_skeleton();
+        assert_eq!(a.save(), b.save(), "genesis skeleton must be byte-identical");
+        // text 객체 ObjId도 같아야 한다.
+        assert_eq!(text_id(&a), text_id(&b));
+    }
+
+    /// 실전 버그 재현: 두 피어가 같은 파일을 **독립적으로 생성**(fork 아님)한 뒤
+    /// 서로의 문서를 교환하면 동일 텍스트로 수렴해야 한다.
+    /// (기존 테스트는 전부 fork라 이 경로가 비어 있었다.)
+    #[test]
+    fn independently_created_docs_converge() {
+        // 피어1은 "AAA"로, 피어2는 "BBB"로 각자 파일을 만들었다.
+        let mut doc1 = new_doc("AAA\n");
+        let mut doc2 = new_doc("BBB\n");
+
+        // 전체 문서를 직렬화해 교환(= CrdtSync) 후 merge.
+        let snap1 = doc1.save();
+        let snap2 = doc2.save();
+        let mut recv2 = AutoCommit::load(&snap2).unwrap();
+        let mut recv1 = AutoCommit::load(&snap1).unwrap();
+        doc1.merge(&mut recv2).expect("merge peer2 into peer1");
+        doc2.merge(&mut recv1).expect("merge peer1 into peer2");
+
+        let t1 = doc_text(&doc1);
+        let t2 = doc_text(&doc2);
+        println!("doc1={t1:?} doc2={t2:?}");
+        assert_eq!(t1, t2, "independently-created docs must converge");
+        // 두 내용 모두 보존(동시 insert) — 한쪽이 사라지면 안 된다.
+        assert!(t1.contains("AAA"), "peer1 content must survive");
+        assert!(t1.contains("BBB"), "peer2 content must survive");
+    }
+
+    /// handle_crdt_sync 프로토콜 모사: CrdtSync(전체 doc) 수신 → merge →
+    /// save_after(받은 heads)로 회신 → 송신측 load_incremental → 수렴.
+    #[test]
+    fn sync_then_reply_roundtrip_converges() {
+        // 두 피어가 독립 생성.
+        let mut p1 = new_doc("AAA\n");
+        let mut p2 = new_doc("BBB\n");
+
+        // 1) p1 → p2 로 CrdtSync(전체 doc) 전송.
+        let sync_from_p1 = p1.save();
+        // 2) p2 수신 측: merge 후, p1이 모르는 변경을 회신.
+        let mut received = AutoCommit::load(&sync_from_p1).unwrap();
+        let received_heads = received.get_heads();
+        p2.merge(&mut received).unwrap();
+        let reply = p2.save_after(&received_heads);
+        // 3) p1 수신: 회신을 load_incremental.
+        p1.load_incremental(&reply).unwrap();
+
+        let t1 = doc_text(&p1);
+        let t2 = doc_text(&p2);
+        println!("p1={t1:?} p2={t2:?}");
+        assert_eq!(t1, t2, "sync+reply must converge");
+        assert!(t1.contains("AAA") && t1.contains("BBB"), "both contents survive");
     }
 
     /// incremental save/load를 통한 변경 교환 (네트워크 시뮬레이션).

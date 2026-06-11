@@ -185,19 +185,44 @@ fn handle_crdt_local_edit(
             });
         }
     } else {
-        let mut doc = crdt::new_doc(&content);
-        let data = doc.save();
+        // 메모리에 문서가 없다 — cold start. 디스크에 저장된 Automerge 문서가
+        // 있으면 그 계보를 **이어서** 써야 한다(예전엔 new_doc으로 계보를 끊어
+        // 재시작 때마다 피어와 발산했다).
+        let had_history = routing::crdt_state_path(root, rel).exists();
+        let mut doc = crdt::load_or_create_doc(root, rel);
+        // 편집 적용 전 heads를 기준점으로 잡아, 정확히 새 변경분만 뽑는다.
+        let base = doc.get_heads();
+        let shadow = crdt::read_shadow(root, rel);
+        crdt::apply_local_edit(&mut doc, &shadow, &content);
+        let changes = doc.save_after(&base);
         crdt::save_doc_to_disk(root, rel, &mut doc);
         crdt::write_shadow(root, rel, &content);
         seen.lock()
             .unwrap()
             .insert(rel.to_string(), entry.hash.clone());
         docs.lock().unwrap().insert(rel.to_string(), doc);
-        println!("[watch] sending CRDT sync for {rel}");
-        registry.broadcast(&Message::CrdtSync {
-            path: rel.to_string(),
-            data,
-        });
+
+        if had_history {
+            // 기존 계보 → 새 변경분만 증분 전송(피어가 이미 골격을 가짐).
+            if !changes.is_empty() {
+                println!("[watch] sending CRDT changes for {rel} (cold start, resumed)");
+                registry.broadcast(&Message::CrdtChanges {
+                    path: rel.to_string(),
+                    changes,
+                });
+            }
+        } else {
+            // 진짜 신규 파일 → 전체 문서로 부트스트랩.
+            let data = {
+                let mut map = docs.lock().unwrap();
+                map.get_mut(rel).unwrap().save()
+            };
+            println!("[watch] sending CRDT sync for {rel} (new file)");
+            registry.broadcast(&Message::CrdtSync {
+                path: rel.to_string(),
+                data,
+            });
+        }
     }
     Ok(())
 }

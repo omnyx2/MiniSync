@@ -400,17 +400,33 @@ fn handle_crdt_sync(
     docs: &CrdtDocs,
     peer_conn: &Arc<PeerConn>,
 ) -> Result<()> {
-    let mut doc = AutoCommit::load(data)?;
-    let received_text = crdt::doc_text(&doc);
+    let mut received = AutoCommit::load(data)?;
+    let received_heads = received.get_heads();
 
-    let current_file = fs::read_to_string(root.join(path)).unwrap_or_default();
-    let mut local_changes = Vec::new();
-    if !current_file.is_empty() && current_file != received_text {
-        crdt::apply_local_edit(&mut doc, &received_text, &current_file);
-        local_changes = doc.save_incremental();
-    }
+    // 받은 문서를 로컬 디스크 백업 문서에 **merge**한다(교체 아님).
+    // genesis 골격이 모든 피어에서 동일하므로 독립 생성/재시작 후에도 깔끔히 합쳐진다.
+    let (content, reply) = {
+        let mut map = docs.lock().unwrap();
+        let doc = map
+            .entry(path.to_string())
+            .or_insert_with(|| crdt::load_or_create_doc(root, path));
 
-    let content = crdt::doc_text(&doc);
+        // 아직 문서에 안 담긴 로컬 파일 편집을 먼저 흡수.
+        let shadow = crdt::read_shadow(root, path);
+        let current_file = fs::read_to_string(root.join(path)).unwrap_or_default();
+        if !current_file.is_empty() && current_file != shadow {
+            crdt::apply_local_edit(doc, &shadow, &current_file);
+        }
+
+        doc.merge(&mut received)?;
+
+        let content = crdt::doc_text(doc);
+        // 피어가 아직 모르는(=받은 heads 이후의) 변경만 회신.
+        let reply = doc.save_after(&received_heads);
+        crdt::save_doc_to_disk(root, path, doc);
+        (content, reply)
+    };
+
     let hash = sha256_hex(content.as_bytes());
     seen.lock().unwrap().insert(path.to_string(), hash);
 
@@ -419,19 +435,17 @@ fn handle_crdt_sync(
         fs::create_dir_all(p)?;
     }
     fs::write(&dest, &content)?;
-    crdt::save_doc_to_disk(root, path, &mut doc);
     crdt::write_shadow(root, path, &content);
-    docs.lock().unwrap().insert(path.to_string(), doc);
 
-    println!("[sync] received CRDT sync for {path}");
+    println!("[sync] merged CRDT sync for {path}");
 
-    if !local_changes.is_empty() {
-        println!("[sync] sending captured local CRDT changes for {path}");
+    if !reply.is_empty() {
+        println!("[sync] replying CRDT changes for {path}");
         send_to_peer(
             peer_conn,
             &Message::CrdtChanges {
                 path: path.to_string(),
-                changes: local_changes,
+                changes: reply,
             },
         )?;
     }
