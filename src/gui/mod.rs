@@ -272,6 +272,8 @@ impl eframe::App for GuiApp {
                         &self.bridge.config,
                         &self.bridge.commands_tx,
                         &mut self.settings_state,
+                        &mut self.bridge.node_name,
+                        &mut self.status_message,
                     );
                 });
         }

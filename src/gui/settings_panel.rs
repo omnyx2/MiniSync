@@ -4,6 +4,7 @@ use eframe::egui;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 
+use crate::config::app::AppConfig;
 use crate::config::{SyncConfig, SyncMode, SyncRule};
 use crate::engine::GuiCommand;
 
@@ -12,6 +13,8 @@ pub struct SettingsState {
     pub new_pattern: String,
     pub new_mode: SyncMode,
     pub editing: bool,
+    pub node_name_edit: String,
+    pub node_name_initialized: bool,
 }
 
 impl Default for SettingsState {
@@ -20,6 +23,8 @@ impl Default for SettingsState {
             new_pattern: String::new(),
             new_mode: SyncMode::Reference,
             editing: false,
+            node_name_edit: String::new(),
+            node_name_initialized: false,
         }
     }
 }
@@ -30,8 +35,53 @@ pub fn settings_panel(
     config: &Arc<RwLock<SyncConfig>>,
     commands_tx: &Sender<GuiCommand>,
     state: &mut SettingsState,
+    node_name: &mut String,
+    status_message: &mut String,
 ) {
     ui.heading("Settings");
+    ui.separator();
+
+    // Node name editor
+    if !state.node_name_initialized {
+        state.node_name_edit = node_name.clone();
+        state.node_name_initialized = true;
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Node name:");
+        let response = ui.text_edit_singleline(&mut state.node_name_edit);
+        if response.lost_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+            && !state.node_name_edit.is_empty()
+            && state.node_name_edit != *node_name
+        {
+            let new_name = state.node_name_edit.clone();
+            *node_name = new_name.clone();
+            // Save to AppConfig
+            let mut app_cfg = AppConfig::load().unwrap_or_default();
+            app_cfg.node_name = new_name.clone();
+            if let Err(e) = app_cfg.save() {
+                *status_message = format!("Failed to save node name: {e}");
+            } else {
+                *status_message = format!("Node name changed to: {new_name}");
+            }
+        }
+        if ui.small_button("Save").clicked()
+            && !state.node_name_edit.is_empty()
+            && state.node_name_edit != *node_name
+        {
+            let new_name = state.node_name_edit.clone();
+            *node_name = new_name.clone();
+            let mut app_cfg = AppConfig::load().unwrap_or_default();
+            app_cfg.node_name = new_name.clone();
+            if let Err(e) = app_cfg.save() {
+                *status_message = format!("Failed to save node name: {e}");
+            } else {
+                *status_message = format!("Node name changed to: {new_name}");
+            }
+        }
+    });
+
     ui.separator();
 
     let cfg = config.read().unwrap().clone();
