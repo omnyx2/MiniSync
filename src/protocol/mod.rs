@@ -28,6 +28,21 @@ pub enum Message {
     CrdtSync { path: String, data: Vec<u8> },
     /// Incremental Automerge changes for an ongoing CRDT-lane edit.
     CrdtChanges { path: String, changes: Vec<u8> },
+    // ── v2: Reference mode ──
+    /// Reference file metadata (no contents). Sent for files in Reference mode.
+    RefIndex(Vec<RefEntry>),
+    /// Request to download a reference-only file from the owner peer.
+    DownloadRequest(String),
+}
+
+/// Metadata for a reference-mode file (no contents transferred).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefEntry {
+    pub path: String,
+    pub size: u64,
+    pub hash: String,
+    pub mtime: i64,
+    pub owner_id: String,
 }
 
 /// Write one length-prefixed message.

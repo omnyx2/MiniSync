@@ -9,7 +9,7 @@ use crate::protocol::{serialize_msg, Message};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::mpsc;
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// 연결 슬롯 식별자. 단조 증가하는 u64로 ABA 문제 방지.
 pub type ConnId = u64;
@@ -20,6 +20,13 @@ pub struct PeerConn {
     pub conn_id: ConnId,
     pub remote_id: String,
     pub writer: mpsc::Sender<Vec<u8>>,
+}
+
+/// Snapshot of peer info for GUI display.
+#[derive(Debug, Clone)]
+pub struct PeerInfo {
+    pub conn_id: ConnId,
+    pub remote_id: String,
 }
 
 /// 현재 연결된 모든 피어의 중앙 레지스트리.
@@ -78,6 +85,29 @@ impl PeerRegistry {
 
     pub fn count(&self) -> usize {
         self.peers.read().unwrap().len()
+    }
+
+    /// Get a snapshot of all connected peers (for GUI).
+    pub fn peer_list(&self) -> Vec<PeerInfo> {
+        let peers = self.peers.read().unwrap();
+        peers
+            .values()
+            .map(|p| PeerInfo {
+                conn_id: p.conn_id,
+                remote_id: p.remote_id.clone(),
+            })
+            .collect()
+    }
+
+    /// Find a peer by remote_id and send a message (unicast).
+    pub fn send_to_remote(&self, remote_id: &str, msg: &Message) -> Result<()> {
+        let peers = self.peers.read().unwrap();
+        for peer in peers.values() {
+            if peer.remote_id == remote_id {
+                return send_to_peer_inner(peer, msg);
+            }
+        }
+        Err(anyhow::anyhow!("peer {remote_id} not found"))
     }
 }
 

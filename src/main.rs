@@ -2,19 +2,11 @@
 //!
 //! Usage:
 //!   minisync <folder> <listen_addr> [peer1_addr] [peer2_addr] ...
+//!   minisync --gui <folder> <listen_addr> [peer1_addr] [peer2_addr] ...
 //!
 //! 모든 노드가 동등: listen + connect 동시 수행.
 //! 어떤 노드가 죽어도 나머지끼리 계속 동기화.
 //! 통신은 rustls TLS로 암호화 (자체서명 인증서).
-
-mod crdt;
-mod index;
-mod peers;
-mod protocol;
-mod routing;
-mod sync;
-mod tls;
-mod watcher;
 
 use anyhow::Result;
 use rustls::{ClientConfig, ServerConfig};
@@ -23,41 +15,57 @@ use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use peers::PeerRegistry;
-use sync::{CrdtDocs, Seen};
+use minisync::catalog::Catalog;
+use minisync::config::SyncConfig;
+use minisync::engine::session::run_peer_session;
+use minisync::engine::watch::watch_loop;
+#[cfg(feature = "gui")]
+use minisync::engine::GuiCommand;
+use minisync::engine::{CrdtDocs, Seen, SyncEngine};
+use minisync::net;
+use minisync::net::peers::PeerRegistry;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
+
+    // Parse --gui flag
+    let gui_mode = args.iter().any(|a| a == "--gui");
+    let filtered_args: Vec<&str> = args.iter().map(|s| s.as_str()).filter(|a| *a != "--gui").collect();
+
+    if filtered_args.len() < 3 {
         eprintln!("minisync — tiny peer-to-peer folder sync (full mesh + TLS)\n");
         eprintln!("Usage:");
         eprintln!(
-            "  {} <folder> <listen_addr> [peer1_addr] [peer2_addr] ...",
-            args[0]
+            "  {} [--gui] <folder> <listen_addr> [peer1_addr] [peer2_addr] ...",
+            filtered_args[0]
         );
         eprintln!();
         eprintln!("Example (3 nodes):");
-        eprintln!("  {} ./data 0.0.0.0:9000 10.0.0.2:9001 10.0.0.3:9002", args[0]);
+        eprintln!(
+            "  {} ./data 0.0.0.0:9000 10.0.0.2:9001 10.0.0.3:9002",
+            filtered_args[0]
+        );
+        eprintln!("  {} --gui ./data 0.0.0.0:9000 10.0.0.2:9001", filtered_args[0]);
         std::process::exit(1);
     }
 
-    let listen_addr = args[2].clone();
-    let peer_addrs: Vec<String> = args[3..]
+    let listen_addr = filtered_args[2].to_string();
+    let peer_addrs: Vec<String> = filtered_args[3..]
         .iter()
-        .filter(|a| a.as_str() > listen_addr.as_str())
-        .cloned()
+        .filter(|a| **a > listen_addr.as_str())
+        .map(|s| s.to_string())
         .collect();
-    std::fs::create_dir_all(&args[1])?;
-    let folder: PathBuf = std::fs::canonicalize(&args[1])?;
+    std::fs::create_dir_all(filtered_args[1])?;
+    let folder: PathBuf = std::fs::canonicalize(filtered_args[1])?;
     let peer_id = generate_peer_id();
 
     // TLS 설정: 자체서명 인증서 생성
-    let (cert, key) = tls::generate_self_signed()?;
-    let server_cfg = tls::server_config(cert, key)?;
-    let client_cfg = tls::client_config();
+    let (cert, key) = net::generate_self_signed()?;
+    let server_cfg = net::server_config(cert, key)?;
+    let client_cfg = net::client_config();
     println!("[minisync] TLS configured (self-signed)");
 
     let root = Arc::new(folder);
@@ -65,19 +73,58 @@ fn main() -> Result<()> {
     let seen: Seen = Arc::new(Mutex::new(HashMap::new()));
     let docs: CrdtDocs = Arc::new(Mutex::new(HashMap::new()));
 
-    println!("[minisync] id={peer_id} listening on {listen_addr}, syncing {:?}", &*root);
+    // Load sync configuration
+    let config = Arc::new(RwLock::new(SyncConfig::load(&root)));
+    println!(
+        "[minisync] config loaded: default_mode={:?}",
+        config.read().unwrap().default_mode
+    );
+
+    // Create catalog
+    let catalog = Catalog::new();
+    minisync::catalog::store::load_catalog(&root, &catalog);
+
+    // GUI channels (if --gui mode)
+    #[allow(unused_variables)]
+    let (gui_tx, gui_rx, engine_arc) = if gui_mode {
+        let (etx, erx) = std::sync::mpsc::channel();
+        let (ctx, crx) = std::sync::mpsc::channel();
+        let engine = Arc::new(SyncEngine {
+            root: Arc::clone(&root),
+            peer_id: peer_id.clone(),
+            registry: Arc::clone(&registry),
+            seen: Arc::clone(&seen),
+            docs: Arc::clone(&docs),
+            config: Arc::clone(&config),
+            catalog: catalog.clone(),
+            gui_tx: Some(etx),
+            gui_rx: Some(Mutex::new(crx)),
+        });
+        (Some(erx), Some(ctx), Some(engine))
+    } else {
+        (None, None, None)
+    };
+
+    println!(
+        "[minisync] id={peer_id} listening on {listen_addr}, syncing {:?}{}",
+        &*root,
+        if gui_mode { " (GUI mode)" } else { "" }
+    );
 
     // 1) Watcher thread
     {
-        let (reg, r, s, d, pid) = (
+        let (reg, r, s, d, pid, cfg, cat, eng) = (
             Arc::clone(&registry),
             Arc::clone(&root),
             Arc::clone(&seen),
             Arc::clone(&docs),
             peer_id.clone(),
+            Arc::clone(&config),
+            catalog.clone(),
+            engine_arc.clone(),
         );
         std::thread::spawn(move || {
-            if let Err(e) = sync::watch_loop(reg, r, s, d, pid) {
+            if let Err(e) = watch_loop(reg, r, s, d, pid, cfg, cat, eng) {
                 eprintln!("[watcher] stopped: {e}");
             }
         });
@@ -86,7 +133,7 @@ fn main() -> Result<()> {
     // 2) Listener thread (inbound: TLS server role)
     {
         let listener = TcpListener::bind(&listen_addr)?;
-        let (reg, r, s, d, pid, scfg, ccfg) = (
+        let (reg, r, s, d, pid, scfg, ccfg, cfg, cat, eng) = (
             Arc::clone(&registry),
             Arc::clone(&root),
             Arc::clone(&seen),
@@ -94,6 +141,9 @@ fn main() -> Result<()> {
             peer_id.clone(),
             Arc::clone(&server_cfg),
             Arc::clone(&client_cfg),
+            Arc::clone(&config),
+            catalog.clone(),
+            engine_arc.clone(),
         );
         std::thread::spawn(move || {
             for stream_result in listener.incoming() {
@@ -101,7 +151,7 @@ fn main() -> Result<()> {
                     Ok(stream) => {
                         let addr = stream.peer_addr().ok();
                         println!("[minisync] inbound connection from {addr:?}");
-                        let (reg2, r2, s2, d2, pid2, scfg2, ccfg2) = (
+                        let (reg2, r2, s2, d2, pid2, scfg2, ccfg2, cfg2, cat2, eng2) = (
                             Arc::clone(&reg),
                             Arc::clone(&r),
                             Arc::clone(&s),
@@ -109,10 +159,14 @@ fn main() -> Result<()> {
                             pid.clone(),
                             Arc::clone(&scfg),
                             Arc::clone(&ccfg),
+                            Arc::clone(&cfg),
+                            cat.clone(),
+                            eng.clone(),
                         );
                         std::thread::spawn(move || {
-                            if let Err(e) = sync::run_peer_session(
-                                stream, true, scfg2, ccfg2, reg2, r2, s2, d2, pid2,
+                            if let Err(e) = run_peer_session(
+                                stream, true, scfg2, ccfg2, reg2, r2, s2, d2, pid2, cfg2, cat2,
+                                eng2,
                             ) {
                                 eprintln!("[sync] inbound session ended: {e}");
                             }
@@ -126,7 +180,7 @@ fn main() -> Result<()> {
 
     // 3) Outbound connector threads (TLS client role)
     for addr in peer_addrs {
-        let (reg, r, s, d, pid, scfg, ccfg) = (
+        let (reg, r, s, d, pid, scfg, ccfg, cfg, cat, eng) = (
             Arc::clone(&registry),
             Arc::clone(&root),
             Arc::clone(&seen),
@@ -134,15 +188,91 @@ fn main() -> Result<()> {
             peer_id.clone(),
             Arc::clone(&server_cfg),
             Arc::clone(&client_cfg),
+            Arc::clone(&config),
+            catalog.clone(),
+            engine_arc.clone(),
         );
         std::thread::spawn(move || {
-            connect_with_retry(&addr, reg, r, s, d, pid, scfg, ccfg);
+            connect_with_retry(&addr, reg, r, s, d, pid, scfg, ccfg, cfg, cat, eng);
         });
     }
 
-    // 4) Main thread park
+    // 4) GUI or headless
+    if gui_mode {
+        #[cfg(feature = "gui")]
+        {
+            // Start GUI command processor thread
+            let eng_for_cmds = engine_arc.clone().unwrap();
+            let root_for_cmds = Arc::clone(&root);
+            std::thread::spawn(move || {
+                gui_command_loop(&eng_for_cmds, &root_for_cmds);
+            });
+
+            let bridge = minisync::gui::state::GuiBridge {
+                events_rx: gui_tx.unwrap(),
+                commands_tx: gui_rx.unwrap(),
+                catalog: catalog.clone(),
+                registry: Arc::clone(&registry),
+                config: Arc::clone(&config),
+                root: Arc::clone(&root),
+            };
+            if let Err(e) = minisync::gui::run_gui(bridge) {
+                eprintln!("[gui] error: {e}");
+            }
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            eprintln!("[minisync] --gui requires the 'gui' feature. Build with: cargo build --features gui");
+            std::process::exit(1);
+        }
+    } else {
+        // Headless mode: park main thread
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[allow(unreachable_code)]
+    Ok(())
+}
+
+/// Process GUI commands in a dedicated thread.
+#[cfg(feature = "gui")]
+fn gui_command_loop(engine: &SyncEngine, root: &std::path::Path) {
+    let rx = match &engine.gui_rx {
+        Some(rx) => rx,
+        None => return,
+    };
     loop {
-        std::thread::park();
+        let cmd = match rx.lock().unwrap().recv() {
+            Ok(cmd) => cmd,
+            Err(_) => break,
+        };
+        match cmd {
+            GuiCommand::Download(path) => {
+                println!("[gui] download requested: {path}");
+                let owners = engine.catalog.owners_of(&path);
+                if let Some(owner) = owners.first() {
+                    if let Err(e) = engine.registry.send_to_remote(
+                        owner,
+                        &minisync::protocol::Message::DownloadRequest(path.clone()),
+                    ) {
+                        eprintln!("[gui] download request failed: {e}");
+                    }
+                } else {
+                    eprintln!("[gui] no owner found for {path}");
+                }
+            }
+            GuiCommand::UpdateConfig(new_config) => {
+                println!("[gui] config updated");
+                new_config.save(root);
+                *engine.config.write().unwrap() = new_config;
+            }
+            GuiCommand::Rescan => {
+                println!("[gui] rescan requested");
+                // Rescan will be triggered by the next watch cycle
+            }
+        }
     }
 }
 
@@ -155,6 +285,9 @@ fn connect_with_retry(
     peer_id: String,
     server_cfg: Arc<ServerConfig>,
     client_cfg: Arc<ClientConfig>,
+    config: Arc<RwLock<SyncConfig>>,
+    catalog: Catalog,
+    engine: Option<Arc<SyncEngine>>,
 ) {
     const MAX_RETRIES: u32 = 5;
     const RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -163,8 +296,9 @@ fn connect_with_retry(
         match TcpStream::connect(addr) {
             Ok(stream) => {
                 println!("[minisync] connected to {addr}");
-                if let Err(e) = sync::run_peer_session(
+                if let Err(e) = run_peer_session(
                     stream, false, server_cfg, client_cfg, registry, root, seen, docs, peer_id,
+                    config, catalog, engine,
                 ) {
                     eprintln!("[sync] outbound session to {addr} ended: {e}");
                 }
