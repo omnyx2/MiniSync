@@ -160,6 +160,20 @@ fn main() -> Result<()> {
         });
     }
 
+    // 1b) Catalog scanner thread: keep the unified catalog in sync with what's
+    //     actually on disk so the GUI shows every file in the shared folder.
+    {
+        let (r, cfg, cat, eng) = (
+            Arc::clone(&root),
+            Arc::clone(&config),
+            catalog.clone(),
+            engine_arc.clone(),
+        );
+        std::thread::spawn(move || {
+            minisync::engine::scan::catalog_scan_loop(r, cat, cfg, eng);
+        });
+    }
+
     // 2) Listener thread (inbound: TLS server role)
     {
         let listener = TcpListener::bind(&listen_addr)?;

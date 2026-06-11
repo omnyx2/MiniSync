@@ -7,6 +7,7 @@
 //!   - transfer: file I/O helpers (apply, hash, conflict)
 
 pub mod handlers;
+pub mod scan;
 pub mod session;
 pub mod transfer;
 pub mod watch;

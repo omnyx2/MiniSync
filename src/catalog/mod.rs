@@ -122,6 +122,42 @@ impl Catalog {
         self.entries.write().unwrap().remove(path);
     }
 
+    /// True if this path is already tracked as local (or both) with the given size.
+    /// Used by the folder scanner to skip re-hashing unchanged files.
+    pub fn is_local_with_size(&self, path: &str, size: u64) -> bool {
+        let map = self.entries.read().unwrap();
+        match map.get(path) {
+            Some(e) => {
+                e.size == size
+                    && matches!(e.location, FileLocation::Local | FileLocation::Both { .. })
+            }
+            None => false,
+        }
+    }
+
+    /// Reconcile the catalog's local view with what's actually on disk.
+    /// `present` = relative paths currently present locally.
+    /// Local-only entries that vanished are removed; Both entries that vanished
+    /// downgrade to Remote (still downloadable); Remote-only entries are kept.
+    pub fn reconcile_local(&self, present: &std::collections::HashSet<String>) {
+        let mut map = self.entries.write().unwrap();
+        map.retain(|path, entry| {
+            if present.contains(path) {
+                return true;
+            }
+            match &entry.location {
+                FileLocation::Local => false,
+                FileLocation::Both { owners } => {
+                    entry.location = FileLocation::Remote {
+                        owners: owners.clone(),
+                    };
+                    true
+                }
+                FileLocation::Remote { .. } => true,
+            }
+        });
+    }
+
     /// Get a snapshot of all catalog entries (for GUI display).
     pub fn snapshot(&self) -> Vec<CatalogEntry> {
         let map = self.entries.read().unwrap();
