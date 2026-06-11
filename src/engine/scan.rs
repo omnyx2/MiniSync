@@ -60,6 +60,13 @@ fn scan_once(root: &PathBuf, catalog: &Catalog, config: &Arc<RwLock<SyncConfig>>
         }
         present.insert(rel.clone());
 
+        // CRDT(텍스트) 파일은 내용이 같은 지금(편집 전) 문서를 선제 생성해 둔다.
+        // 두 피어가 동일 내용에서 결정적 genesis로 만들면 같은 계보가 되어,
+        // 이후 첫 동시 편집도 데이터 유실 없이 병합된다.
+        if routing::lane_for(&rel) == routing::Lane::Crdt {
+            crate::crdt::ensure_doc(root, &rel);
+        }
+
         // 크기가 그대로면 이미 표시 중이므로 재해시 생략(비용 절약).
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
         if catalog.is_local_with_size(&rel, size) {

@@ -36,16 +36,24 @@ fn new_doc_skeleton() -> AutoCommit {
 }
 
 /// 새 Automerge 문서를 만들고 `initial` 내용으로 초기화한다.
-/// genesis는 공유 골격에서 시작하고, 실제 편집은 피어별 고유 actor로 기록한다.
+///
+/// **초기 내용까지** genesis(고정 actor + 고정 time)에 담는다. 두 피어가 같은
+/// 내용으로 파일을 독립 생성하면 genesis change가 바이트 동일 → merge 시 dedup
+/// → 내용이 중복되지 않는다. 이후의 실제 편집만 피어별 고유 actor로 기록해
+/// 동시편집이 충돌 없이 병합되게 한다.
 pub fn new_doc(initial: &str) -> AutoCommit {
-    let mut doc = new_doc_skeleton();
-    // genesis 이후의 모든 편집은 이 노드 고유 actor로 — 동시편집이 충돌 없이 병합되도록.
-    doc.set_actor(ActorId::random());
+    let mut doc = AutoCommit::new().with_actor(ActorId::from(GENESIS_ACTOR));
+    let text_id = doc
+        .put_object(ROOT, TEXT_KEY, ObjType::Text)
+        .expect("genesis put_object");
     if !initial.is_empty() {
-        let text_id = text_id(&doc);
         doc.splice_text(&text_id, 0, 0, initial)
             .expect("initial splice_text");
     }
+    // 초기 내용을 포함한 genesis를 고정 시각으로 봉인.
+    doc.commit_with(CommitOptions::default().with_time(0));
+    // 이후 편집은 고유 actor로.
+    doc.set_actor(ActorId::random());
     doc
 }
 
@@ -134,6 +142,26 @@ pub fn load_or_create_doc(root: &Path, rel: &str) -> AutoCommit {
     // shadow도 초기화
     write_shadow(root, rel, &content);
     doc
+}
+
+/// CRDT 문서를 **미리** 만들어 둔다(아직 없을 때만). 파일 내용이 양쪽에서
+/// 동일한 시점(편집 전)에 호출되면, 결정적 genesis 덕분에 두 피어가 바이트
+/// 동일한 문서를 독립 생성 → 이후 동시 편집이 같은 text 객체 위에서 병합된다.
+/// 편집이 먼저 일어나 내용이 갈린 뒤 각자 만들면 genesis가 어긋나 데이터가
+/// 유실되므로, 스캐너가 내용이 같을 때 선제적으로 호출한다. .amrg가 이미 있으면
+/// 즉시 반환(경로 확인만).
+pub fn ensure_doc(root: &Path, rel: &str) {
+    if routing::crdt_state_path(root, rel).exists() {
+        return;
+    }
+    // UTF-8 텍스트만(읽기 실패 시 건너뜀).
+    let content = match fs::read_to_string(root.join(rel)) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let mut doc = new_doc(&content);
+    save_doc_to_disk(root, rel, &mut doc);
+    write_shadow(root, rel, &content);
 }
 
 /// Automerge 문서를 `.minisync/crdt/<rel>.amrg`에 저장.
@@ -275,39 +303,59 @@ mod tests {
         assert_eq!(text_id(&a), text_id(&b));
     }
 
-    /// 실전 버그 재현: 두 피어가 같은 파일을 **독립적으로 생성**(fork 아님)한 뒤
-    /// 서로의 문서를 교환하면 동일 텍스트로 수렴해야 한다.
-    /// (기존 테스트는 전부 fork라 이 경로가 비어 있었다.)
+    /// 실전 버그 재현: 같은 내용의 파일이 양쪽에 이미 있고(=동일 base) CRDT
+    /// 상태가 비어 두 피어가 문서를 **독립 생성**한 뒤, 서로 다른 줄을 편집한다.
+    /// content-in-genesis 덕분에 base는 dedup되어 **중복 없이** 수렴해야 한다.
+    /// (이전엔 base가 양쪽 고유 actor로 중복 삽입되어 문서가 2배가 됐다.)
     #[test]
-    fn independently_created_docs_converge() {
-        // 피어1은 "AAA"로, 피어2는 "BBB"로 각자 파일을 만들었다.
-        let mut doc1 = new_doc("AAA\n");
-        let mut doc2 = new_doc("BBB\n");
+    fn independently_created_same_base_no_duplication() {
+        let base = "line1\nline2\nline3\nline4\n";
+        let mut doc1 = new_doc(base);
+        let mut doc2 = new_doc(base);
 
-        // 전체 문서를 직렬화해 교환(= CrdtSync) 후 merge.
-        let snap1 = doc1.save();
-        let snap2 = doc2.save();
-        let mut recv2 = AutoCommit::load(&snap2).unwrap();
-        let mut recv1 = AutoCommit::load(&snap1).unwrap();
-        doc1.merge(&mut recv2).expect("merge peer2 into peer1");
-        doc2.merge(&mut recv1).expect("merge peer1 into peer2");
+        // 같은 base로 만들었으면 genesis가 바이트 동일해야 한다.
+        assert_eq!(
+            new_doc_skeleton().save(),
+            new_doc_skeleton().save(),
+            "empty skeleton deterministic"
+        );
+
+        // 피어1은 line2를, 피어2는 line4를 편집(동시).
+        apply_local_edit(&mut doc1, base, "line1\nLINE2-BY-1\nline3\nline4\n");
+        apply_local_edit(&mut doc2, base, "line1\nline2\nline3\nLINE4-BY-2\n");
+
+        // CrdtSync 교환 + merge.
+        let mut recv2 = AutoCommit::load(&doc2.save()).unwrap();
+        let mut recv1 = AutoCommit::load(&doc1.save()).unwrap();
+        doc1.merge(&mut recv2).unwrap();
+        doc2.merge(&mut recv1).unwrap();
 
         let t1 = doc_text(&doc1);
         let t2 = doc_text(&doc2);
-        println!("doc1={t1:?} doc2={t2:?}");
-        assert_eq!(t1, t2, "independently-created docs must converge");
-        // 두 내용 모두 보존(동시 insert) — 한쪽이 사라지면 안 된다.
-        assert!(t1.contains("AAA"), "peer1 content must survive");
-        assert!(t1.contains("BBB"), "peer2 content must survive");
+        println!("doc1={t1:?}\ndoc2={t2:?}");
+        assert_eq!(t1, t2, "must converge");
+        assert!(t1.contains("LINE2-BY-1"), "peer1 edit present");
+        assert!(t1.contains("LINE4-BY-2"), "peer2 edit present");
+        // 중복 금지: 4줄짜리 base가 두 번 들어가면 안 된다.
+        assert_eq!(
+            t1.lines().count(),
+            4,
+            "no duplication: must stay 4 lines, got {:?}",
+            t1
+        );
+        assert_eq!(t1.matches("line1").count(), 1, "base not duplicated");
     }
 
     /// handle_crdt_sync 프로토콜 모사: CrdtSync(전체 doc) 수신 → merge →
     /// save_after(받은 heads)로 회신 → 송신측 load_incremental → 수렴.
     #[test]
     fn sync_then_reply_roundtrip_converges() {
-        // 두 피어가 독립 생성.
-        let mut p1 = new_doc("AAA\n");
-        let mut p2 = new_doc("BBB\n");
+        // 같은 base에서 독립 생성 후 서로 다른 줄 편집.
+        let base = "AAA\nBBB\n";
+        let mut p1 = new_doc(base);
+        let mut p2 = new_doc(base);
+        apply_local_edit(&mut p1, base, "AAA-1\nBBB\n");
+        apply_local_edit(&mut p2, base, "AAA\nBBB-2\n");
 
         // 1) p1 → p2 로 CrdtSync(전체 doc) 전송.
         let sync_from_p1 = p1.save();
@@ -323,7 +371,8 @@ mod tests {
         let t2 = doc_text(&p2);
         println!("p1={t1:?} p2={t2:?}");
         assert_eq!(t1, t2, "sync+reply must converge");
-        assert!(t1.contains("AAA") && t1.contains("BBB"), "both contents survive");
+        assert!(t1.contains("AAA-1") && t1.contains("BBB-2"), "both edits survive");
+        assert_eq!(t1.lines().count(), 2, "no duplication, got {t1:?}");
     }
 
     /// incremental save/load를 통한 변경 교환 (네트워크 시뮬레이션).
