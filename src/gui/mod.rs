@@ -20,6 +20,9 @@ pub struct GuiApp {
     status_message: String,
     /// True while files are being hovered over the window.
     hovering_files: bool,
+    /// Relative path of the folder currently shown in the file browser
+    /// (empty string = sync root).
+    current_dir: String,
 }
 
 impl GuiApp {
@@ -30,6 +33,7 @@ impl GuiApp {
             settings_state: SettingsState::default(),
             status_message: String::new(),
             hovering_files: false,
+            current_dir: String::new(),
         }
     }
 
@@ -280,7 +284,13 @@ impl eframe::App for GuiApp {
 
         // Central panel: file browser
         egui::CentralPanel::default().show(ctx, |ui| {
-            file_browser::file_browser_panel(ui, &entries, &self.bridge.commands_tx, &self.bridge.node_name);
+            file_browser::file_browser_panel(
+                ui,
+                &entries,
+                &self.bridge.commands_tx,
+                &self.bridge.node_name,
+                &mut self.current_dir,
+            );
         });
 
         // Drop overlay

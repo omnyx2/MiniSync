@@ -1,21 +1,108 @@
-//! File browser panel: catalog table with Download buttons for remote files.
+//! File browser panel: folder-navigable catalog view with Download buttons.
+//!
+//! Entries are stored as flat relative paths (e.g. `docs/spec/menu.csv`). This
+//! panel renders them like a file manager: only the items directly inside the
+//! current directory are shown, sub-folders are clickable to descend into, and
+//! a breadcrumb bar walks back up.
 
 use eframe::egui;
+use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
 
 use crate::catalog::{CatalogEntry, FileLocation};
 use crate::config::SyncMode;
 use crate::engine::GuiCommand;
 
+/// Aggregated info about a sub-folder directly under the current directory.
+struct FolderRow {
+    name: String,
+    file_count: usize,
+    total_size: u64,
+}
+
 /// Render the file browser panel.
+///
+/// `current_dir` is the relative path of the folder currently being viewed
+/// (empty string = sync root). It is mutated when the user navigates.
 pub fn file_browser_panel(
     ui: &mut egui::Ui,
     entries: &[CatalogEntry],
     commands_tx: &Sender<GuiCommand>,
     self_node_name: &str,
+    current_dir: &mut String,
 ) {
     ui.heading("File Browser");
+
+    // Breadcrumb bar: root / seg1 / seg2 ...
+    ui.horizontal(|ui| {
+        if ui.button("🏠 root").clicked() {
+            current_dir.clear();
+        }
+        // Own the segments so the cumulative prefix doesn't keep `current_dir`
+        // borrowed while we re-assign it on a click.
+        let segments: Vec<String> = if current_dir.is_empty() {
+            Vec::new()
+        } else {
+            current_dir.split('/').map(|s| s.to_string()).collect()
+        };
+        let mut acc = String::new();
+        for seg in &segments {
+            ui.label("/");
+            if acc.is_empty() {
+                acc = seg.clone();
+            } else {
+                acc = format!("{acc}/{seg}");
+            }
+            if ui.button(seg).clicked() {
+                *current_dir = acc.clone();
+            }
+        }
+    });
     ui.separator();
+
+    // Split entries into sub-folders and files that live directly in current_dir.
+    let prefix = if current_dir.is_empty() {
+        String::new()
+    } else {
+        format!("{current_dir}/")
+    };
+
+    let mut folders: BTreeMap<String, FolderRow> = BTreeMap::new();
+    let mut files: Vec<&CatalogEntry> = Vec::new();
+
+    for entry in entries {
+        if !prefix.is_empty() && !entry.path.starts_with(&prefix) {
+            continue;
+        }
+        let rel = &entry.path[prefix.len()..];
+        if rel.is_empty() {
+            continue;
+        }
+        match rel.find('/') {
+            Some(slash) => {
+                // Lives inside a sub-folder of the current directory.
+                let folder_name = &rel[..slash];
+                let row = folders
+                    .entry(folder_name.to_string())
+                    .or_insert_with(|| FolderRow {
+                        name: folder_name.to_string(),
+                        file_count: 0,
+                        total_size: 0,
+                    });
+                row.file_count += 1;
+                row.total_size += entry.size;
+            }
+            None => {
+                // A file directly in the current directory.
+                files.push(entry);
+            }
+        }
+    }
+
+    if folders.is_empty() && files.is_empty() {
+        ui.weak("(empty folder)");
+        return;
+    }
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         egui::Grid::new("file_grid")
@@ -23,15 +110,37 @@ pub fn file_browser_panel(
             .min_col_width(60.0)
             .show(ui, |ui| {
                 // Header
-                ui.strong("Path");
+                ui.strong("Name");
                 ui.strong("Size");
                 ui.strong("Mode");
                 ui.strong("Location");
                 ui.strong("Action");
                 ui.end_row();
 
-                for entry in entries {
-                    ui.label(&entry.path);
+                // Folders first, clickable to descend.
+                for folder in folders.values() {
+                    if ui
+                        .button(format!("📁 {}", folder.name))
+                        .on_hover_text("Open folder")
+                        .clicked()
+                    {
+                        *current_dir = if current_dir.is_empty() {
+                            folder.name.clone()
+                        } else {
+                            format!("{current_dir}/{}", folder.name)
+                        };
+                    }
+                    ui.label(format_size(folder.total_size));
+                    ui.label("");
+                    ui.label(format!("{} item(s)", folder.file_count));
+                    ui.label("");
+                    ui.end_row();
+                }
+
+                // Files in this directory.
+                for entry in &files {
+                    let name = file_name_of(&entry.path);
+                    ui.label(format!("📄 {name}"));
                     ui.label(format_size(entry.size));
                     ui.label(mode_label(entry.sync_mode));
                     ui.label(location_label(&entry.location, self_node_name));
@@ -39,7 +148,8 @@ pub fn file_browser_panel(
                     match &entry.location {
                         FileLocation::Remote { .. } => {
                             if ui.button("Download").clicked() {
-                                let _ = commands_tx.send(GuiCommand::Download(entry.path.clone()));
+                                let _ =
+                                    commands_tx.send(GuiCommand::Download(entry.path.clone()));
                             }
                         }
                         _ => {
@@ -50,6 +160,11 @@ pub fn file_browser_panel(
                 }
             });
     });
+}
+
+/// Last path segment (the bare file name) of a relative path.
+fn file_name_of(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 fn format_size(bytes: u64) -> String {
