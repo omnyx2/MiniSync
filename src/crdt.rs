@@ -26,6 +26,8 @@ const GENESIS_ACTOR: [u8; 16] = [0u8; 16];
 
 /// genesis 골격: 고정 actor + 고정 timestamp(0)로 빈 text 객체만 만든 문서.
 /// 어떤 피어에서 호출해도 직렬화 결과가 동일하다(merge 시 dedup됨).
+/// 결정성 검증 테스트 전용(실제 `new_doc`은 동일 절차를 인라인으로 수행).
+#[cfg(test)]
 fn new_doc_skeleton() -> AutoCommit {
     let mut doc = AutoCommit::new().with_actor(ActorId::from(GENESIS_ACTOR));
     doc.put_object(ROOT, TEXT_KEY, ObjType::Text)
