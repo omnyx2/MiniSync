@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::catalog::Catalog;
 use crate::config::SyncConfig;
-use crate::engine::{EngineEvent, GuiCommand};
+use crate::engine::{EngineEvent, GuiCommand, SyncEngine};
 use crate::net::peers::PeerRegistry;
 
 /// Bridge between the GUI and the engine.
@@ -26,4 +26,7 @@ pub struct GuiBridge {
     pub root: Arc<PathBuf>,
     /// This node's human-readable name.
     pub node_name: String,
+    /// The sync engine — used to install the repaint hook so engine events
+    /// wake the GUI immediately instead of waiting for the idle timer.
+    pub engine: Arc<SyncEngine>,
 }

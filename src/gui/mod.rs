@@ -318,7 +318,9 @@ impl eframe::App for GuiApp {
                 });
         }
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        // Engine events now drive repaints via the repaint hook, so this is
+        // just an idle safety net (covers anything not wired through notify_gui).
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
 }
 
@@ -334,6 +336,16 @@ pub fn run_gui(bridge: GuiBridge) -> eframe::Result {
     eframe::run_native(
         "minisync",
         options,
-        Box::new(|_cc| Ok(Box::new(GuiApp::new(bridge)))),
+        Box::new(|cc| {
+            // Install a repaint hook so engine events (local edits, files
+            // arriving from peers, peer connect/disconnect) wake the window
+            // instantly instead of waiting for the idle repaint timer.
+            let ctx = cc.egui_ctx.clone();
+            let _ = bridge
+                .engine
+                .repaint
+                .set(Box::new(move || ctx.request_repaint()));
+            Ok(Box::new(GuiApp::new(bridge)))
+        }),
     )
 }

@@ -67,13 +67,21 @@ pub struct SyncEngine {
     pub catalog: Catalog,
     pub gui_tx: Option<Sender<EngineEvent>>,
     pub gui_rx: Option<Mutex<Receiver<GuiCommand>>>,
+    /// Wakes the GUI to repaint immediately. Set once, after the GUI's egui
+    /// context exists (the engine is built before the window). Without it, the
+    /// GUI only repaints on its idle timer, so live updates lag by up to 500ms.
+    /// Kept as a plain closure so this module needs no egui dependency.
+    pub repaint: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl SyncEngine {
-    /// Notify the GUI (if connected) of an event.
+    /// Notify the GUI (if connected) of an event and wake it to repaint now.
     pub fn notify_gui(&self, event: EngineEvent) {
         if let Some(tx) = &self.gui_tx {
             let _ = tx.send(event);
+        }
+        if let Some(repaint) = self.repaint.get() {
+            repaint();
         }
     }
 }

@@ -127,6 +127,7 @@ fn main() -> Result<()> {
             catalog: catalog.clone(),
             gui_tx: Some(etx),
             gui_rx: Some(Mutex::new(crx)),
+            repaint: std::sync::OnceLock::new(),
         });
         (Some(erx), Some(ctx), Some(engine))
     } else {
@@ -301,6 +302,7 @@ fn main() -> Result<()> {
                 config: Arc::clone(&config),
                 root: Arc::clone(&root),
                 node_name: node_name.clone(),
+                engine: engine_arc.clone().unwrap(),
             };
             if let Err(e) = minisync::gui::run_gui(bridge) {
                 eprintln!("[gui] error: {e}");
