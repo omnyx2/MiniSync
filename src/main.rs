@@ -8,6 +8,7 @@ use anyhow::Result;
 use rustls::{ClientConfig, ServerConfig};
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -23,6 +24,58 @@ use minisync::engine::{CrdtDocs, Seen, SyncEngine};
 use minisync::net;
 use minisync::net::discovery;
 use minisync::net::peers::PeerRegistry;
+
+/// TCP MSS clamp (0 = off). Set in lattice mode: the overlay relays traffic over
+/// a path whose effective MTU (~1428) is below the tun MTU (1500), so full-size
+/// 1500-byte segments black-hole — TLS handshakes (small) succeed but the larger
+/// index/file messages stall. Capping our send MSS keeps every segment inside the
+/// tunnel. Both peers clamp, so neither direction over-sends.
+static MSS_CLAMP: AtomicU32 = AtomicU32::new(0);
+
+/// Bind a TCP listener, clamping MSS *before* listen so the SYN-ACK advertises
+/// the small MSS (and accepted sockets inherit it). Falls back to a plain
+/// listener if the address can't be parsed as a socket addr.
+fn tcp_listener(addr: &str) -> std::io::Result<TcpListener> {
+    let sa: std::net::SocketAddr = match addr.parse() {
+        Ok(sa) => sa,
+        Err(_) => return TcpListener::bind(addr),
+    };
+    let domain = if sa.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    sock.set_reuse_address(true)?;
+    let mss = MSS_CLAMP.load(Ordering::Relaxed);
+    if mss > 0 {
+        let _ = sock.set_mss(mss);
+    }
+    sock.bind(&sa.into())?;
+    sock.listen(128)?;
+    Ok(sock.into())
+}
+
+/// Connect a TCP stream, clamping MSS *before* connect so our SYN advertises the
+/// small MSS. Falls back to a plain connect if the address isn't a socket addr.
+fn tcp_connect(addr: &str) -> std::io::Result<TcpStream> {
+    let sa: std::net::SocketAddr = match addr.parse() {
+        Ok(sa) => sa,
+        Err(_) => return TcpStream::connect(addr),
+    };
+    let domain = if sa.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    let mss = MSS_CLAMP.load(Ordering::Relaxed);
+    if mss > 0 {
+        let _ = sock.set_mss(mss);
+    }
+    sock.connect(&sa.into())?;
+    Ok(sock.into())
+}
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -48,6 +101,11 @@ fn main() -> Result<()> {
             other => filtered_args.push(other),
         }
         i += 1;
+    }
+    // In lattice mode, clamp TCP MSS so segments fit the overlay's relayed path
+    // MTU (avoids the large-message black-hole; see MSS_CLAMP).
+    if lattice_enabled {
+        MSS_CLAMP.store(1300, Ordering::Relaxed);
     }
 
     // Resolve settings: CLI args > saved AppConfig > show usage
@@ -195,7 +253,7 @@ fn main() -> Result<()> {
 
     // 2) Listener thread (inbound: TLS server role)
     {
-        let listener = TcpListener::bind(&listen_addr)?;
+        let listener = tcp_listener(&listen_addr)?;
         let (reg, r, s, d, pid, nn, scfg, ccfg, cfg, cat, eng) = (
             Arc::clone(&registry),
             Arc::clone(&root),
@@ -263,10 +321,13 @@ fn main() -> Result<()> {
         });
     }
 
-    // 4) UDP auto-discovery: beacon broadcaster + listener (LAN peer discovery)
+    // 4) UDP auto-discovery: beacon broadcaster + listener (LAN peer discovery).
+    // Disabled in lattice mode — on a shared LAN both paths would connect the
+    // same peer pair, and the duplicate-session dedup churns (EOF flapping)
+    // and breaks sync. In lattice mode the overlay is the sole discovery path.
     let listen_port: Option<u16> = listen_addr.rsplit(':').next().and_then(|p| p.parse().ok());
     match listen_port {
-        Some(port) => {
+        Some(port) if !lattice_enabled => {
             // 4a) Beacon broadcaster
             {
                 let (pid, nn) = (peer_id.clone(), node_name.clone());
@@ -295,6 +356,10 @@ fn main() -> Result<()> {
                     );
                 });
             }
+        }
+        Some(_) => {
+            // lattice mode: overlay is the sole discovery path.
+            println!("[discovery] LAN UDP discovery disabled (lattice mode)");
         }
         None => eprintln!(
             "[discovery] could not parse port from listen_addr '{listen_addr}', auto-discovery disabled"
@@ -454,7 +519,7 @@ fn connect_with_retry(
     const RETRY_DELAY: Duration = Duration::from_secs(2);
 
     for attempt in 1..=MAX_RETRIES {
-        match TcpStream::connect(addr) {
+        match tcp_connect(addr) {
             Ok(stream) => {
                 println!("[minisync] connected to {addr}");
                 if let Err(e) = run_peer_session(

@@ -20,9 +20,26 @@ const TEXT_KEY: &str = "text";
 
 /// genesis(빈 text 객체 생성) 연산에만 쓰는 고정 actor.
 /// 모든 피어/모든 파일에서 동일하므로, 두 노드가 같은 파일을 **독립적으로**
-/// 생성해도 genesis change가 바이트 단위로 동일(같은 ChangeHash)해진다.
+/// 생성해도 genesis change(빈 text 객체)가 바이트 동일해진다.
 /// → `text` 객체의 ObjId가 같아져 두 문서가 깔끔히 merge된다.
+/// ⚠️ 내용 splice에는 이 actor를 쓰면 안 된다. 내용이 다른 두 노드가 같은
+/// (actor0, seq1) 변경을 만들어 Automerge가 "duplicate seq"로 거부(세션 크래시)한다.
 const GENESIS_ACTOR: [u8; 16] = [0u8; 16];
+
+/// 초기 내용 splice에 쓰는 **내용 파생 actor**. 내용 sha256의 앞 16바이트.
+/// 같은 내용 → 같은 actor → 같은 변경 → merge 시 dedup(중복 없음).
+/// 다른 내용 → 다른 actor → (actor,seq) 충돌 없이 동시 insert로 병합(크래시 없음).
+fn content_actor(content: &str) -> ActorId {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(content.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // genesis actor와의 우연한 충돌 방지(빈 내용은 splice 안 하므로 사실상 불가).
+    if bytes == GENESIS_ACTOR {
+        bytes[0] = 1;
+    }
+    ActorId::from(bytes)
+}
 
 /// genesis 골격: 고정 actor + 고정 timestamp(0)로 빈 text 객체만 만든 문서.
 /// 어떤 피어에서 호출해도 직렬화 결과가 동일하다(merge 시 dedup됨).
@@ -39,21 +56,26 @@ fn new_doc_skeleton() -> AutoCommit {
 
 /// 새 Automerge 문서를 만들고 `initial` 내용으로 초기화한다.
 ///
-/// **초기 내용까지** genesis(고정 actor + 고정 time)에 담는다. 두 피어가 같은
-/// 내용으로 파일을 독립 생성하면 genesis change가 바이트 동일 → merge 시 dedup
-/// → 내용이 중복되지 않는다. 이후의 실제 편집만 피어별 고유 actor로 기록해
-/// 동시편집이 충돌 없이 병합되게 한다.
+/// 3단계로 결정적이면서 충돌 없게 만든다:
+///  1. 빈 text 객체를 **고정 actor(0)** 로 생성 → 모든 노드에서 text ObjId 동일.
+///  2. 초기 내용을 **내용 파생 actor** 로 splice → 같은 내용은 dedup, 다른 내용은
+///     (actor,seq) 충돌 없이 병합(예전 고정 actor 방식의 "duplicate seq" 크래시 제거).
+///  3. 이후 로컬 편집용으로 **피어별 고유(random) actor** 로 전환.
 pub fn new_doc(initial: &str) -> AutoCommit {
     let mut doc = AutoCommit::new().with_actor(ActorId::from(GENESIS_ACTOR));
     let text_id = doc
         .put_object(ROOT, TEXT_KEY, ObjType::Text)
         .expect("genesis put_object");
+    // 빈 골격 genesis를 고정 시각으로 봉인(노드 간 바이트 동일).
+    doc.commit_with(CommitOptions::default().with_time(0));
+
     if !initial.is_empty() {
+        // 초기 내용은 내용 파생 actor + 고정 시각 → 같은 내용이면 변경 해시도 동일.
+        doc.set_actor(content_actor(initial));
         doc.splice_text(&text_id, 0, 0, initial)
             .expect("initial splice_text");
+        doc.commit_with(CommitOptions::default().with_time(0));
     }
-    // 초기 내용을 포함한 genesis를 고정 시각으로 봉인.
-    doc.commit_with(CommitOptions::default().with_time(0));
     // 이후 편집은 고유 actor로.
     doc.set_actor(ActorId::random());
     doc
@@ -346,6 +368,24 @@ mod tests {
             t1
         );
         assert_eq!(t1.matches("line1").count(), 1, "base not duplicated");
+    }
+
+    /// 회귀 방지: 내용이 **다른** 두 문서를 독립 생성해 merge해도 Automerge가
+    /// "duplicate seq found for actor 0"로 거부(세션 크래시)하지 않아야 한다.
+    /// (예전 content-in-genesis가 고정 actor0에 내용을 담아 이 크래시를 유발했다.)
+    #[test]
+    fn divergent_content_merges_without_duplicate_seq() {
+        let mut a = new_doc("apple\n");
+        let mut b = new_doc("banana split\n");
+        // 양방향 merge — panic/Err 없이 수렴해야 한다.
+        let mut ra = AutoCommit::load(&a.save()).unwrap();
+        let mut rb = AutoCommit::load(&b.save()).unwrap();
+        a.merge(&mut rb).expect("merge divergent b into a must not error");
+        b.merge(&mut ra).expect("merge divergent a into b must not error");
+        assert_eq!(doc_text(&a), doc_text(&b), "must converge");
+        // 두 내용 모두 살아남는다(동시 insert).
+        assert!(doc_text(&a).contains("apple"));
+        assert!(doc_text(&a).contains("banana"));
     }
 
     /// handle_crdt_sync 프로토콜 모사: CrdtSync(전체 doc) 수신 → merge →
