@@ -483,6 +483,9 @@ fn default_sync_folder() -> String {
     PathBuf::from(home).join("MiniSync").display().to_string()
 }
 
+// In the GUI build a no-arg launch falls back to the GUI (never prints usage),
+// so this is only reached in headless builds.
+#[allow(dead_code)]
 fn print_usage(prog: &str) {
     eprintln!("minisync — tiny peer-to-peer folder sync (full mesh + TLS)\n");
     eprintln!("Usage:");
