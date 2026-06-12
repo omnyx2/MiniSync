@@ -3,6 +3,7 @@
 //! P2P이므로 CA 검증 생략 (NoVerifier). 모든 인증서 수용.
 
 pub mod discovery;
+pub mod lattice;
 pub mod peers;
 
 use anyhow::Result;

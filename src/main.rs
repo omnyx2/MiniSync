@@ -27,13 +27,28 @@ use minisync::net::peers::PeerRegistry;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
-    // Parse --gui flag
-    let gui_mode = args.iter().any(|a| a == "--gui");
-    let filtered_args: Vec<&str> = args
-        .iter()
-        .map(|s| s.as_str())
-        .filter(|a| *a != "--gui")
-        .collect();
+    // Parse flags (--gui, --lattice[, --lattice-socket <path>]) and strip them,
+    // leaving only positional args (folder, listen_addr, peers...).
+    let mut gui_mode = false;
+    let mut lattice_enabled = false;
+    let mut lattice_socket = net::lattice::DEFAULT_SOCKET.to_string();
+    let mut filtered_args: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--gui" => gui_mode = true,
+            "--lattice" => lattice_enabled = true,
+            "--lattice-socket" => {
+                lattice_enabled = true;
+                if i + 1 < args.len() {
+                    lattice_socket = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            other => filtered_args.push(other),
+        }
+        i += 1;
+    }
 
     // Resolve settings: CLI args > saved AppConfig > show usage
     let (folder_str, listen_addr, peer_addrs) = if filtered_args.len() >= 3 {
@@ -286,6 +301,40 @@ fn main() -> Result<()> {
         ),
     }
 
+    // 4c) Lattice overlay discovery (opt-in via --lattice). Polls the lattice
+    // daemon's health_check IPC and dials connected peers on their virtual IPs.
+    // Requires all nodes to listen on the same port (peers are dialed at
+    // <virtual_ip>:<this listen port>).
+    if lattice_enabled {
+        match listen_port {
+            Some(port) => {
+                let (reg, r, s, d, pid, nn, scfg, ccfg, cfg, cat, eng) = (
+                    Arc::clone(&registry),
+                    Arc::clone(&root),
+                    Arc::clone(&seen),
+                    Arc::clone(&docs),
+                    peer_id.clone(),
+                    node_name.clone(),
+                    Arc::clone(&server_cfg),
+                    Arc::clone(&client_cfg),
+                    Arc::clone(&config),
+                    catalog.clone(),
+                    engine_arc.clone(),
+                );
+                let sock = lattice_socket.clone();
+                std::thread::spawn(move || {
+                    net::lattice::lattice_discovery_loop(
+                        sock, port, pid, reg, r, s, d, nn, scfg, ccfg, cfg, cat, eng,
+                        connect_with_retry,
+                    );
+                });
+            }
+            None => eprintln!(
+                "[lattice] could not parse port from listen_addr '{listen_addr}', lattice discovery disabled"
+            ),
+        }
+    }
+
     // 5) GUI or headless
     if gui_mode {
         #[cfg(feature = "gui")]
@@ -332,8 +381,13 @@ fn main() -> Result<()> {
 fn print_usage(prog: &str) {
     eprintln!("minisync — tiny peer-to-peer folder sync (full mesh + TLS)\n");
     eprintln!("Usage:");
-    eprintln!("  {prog} [--gui] <folder> <listen_addr> [peer1_addr] ...");
+    eprintln!("  {prog} [--gui] [--lattice] <folder> <listen_addr> [peer1_addr] ...");
     eprintln!("  {prog} --gui                (uses saved settings)");
+    eprintln!();
+    eprintln!("  --lattice                  discover peers via the lattice VPN overlay");
+    eprintln!("                             (dials connected peers on <virtual_ip>:<listen port>;");
+    eprintln!("                             all nodes must share the same listen port)");
+    eprintln!("  --lattice-socket <path>    lattice IPC socket (default /tmp/lattice.sock)");
     eprintln!();
     eprintln!("Settings are saved to: {}", AppConfig::config_path().display());
     eprintln!();
