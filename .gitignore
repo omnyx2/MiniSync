@@ -7,3 +7,6 @@
 
 # Claude Code local agent settings (do not publish)
 .claude/
+
+# Prebuilt binaries — distributed via GitHub Releases, not committed
+/dist

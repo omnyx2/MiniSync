@@ -5,15 +5,18 @@ Rust 단일 바이너리로 별도 의존성 없이 실행 가능.
 
 ## 빌드 없이 바로 사용 (Pre-built Binaries)
 
-`dist/` 폴더에 빌드된 바이너리가 있습니다:
+[**GitHub Releases**](https://github.com/omnyx2/MiniSync/releases)에서 플랫폼별 바이너리를 받으세요:
 
 | 파일 | 플랫폼 | 아키텍처 | 비고 |
 |---|---|---|---|
-| `dist/minisync-macos` | macOS | Universal | GUI 지원 (`--gui`) |
-| `dist/minisync-linux-amd64` | Linux | x86_64 | 정적 링크 (musl) |
-| `dist/minisync-linux-arm64` | Linux | aarch64 | 정적 링크 (musl) |
+| `minisync-macos` | macOS | Apple Silicon (arm64) | GUI 지원 (`--gui`) |
+| `minisync-linux-amd64` | Linux | x86_64 | 정적 링크 (musl) |
+| `minisync-linux-arm64` | Linux | aarch64 | 정적 링크 (musl) |
 
 Linux 바이너리는 정적 링크되어 있어 **우분투 등 어떤 리눅스에서든 의존성 설치 없이 바로 실행**됩니다.
+받은 뒤 실행 권한을 부여하세요: `chmod +x minisync-*`
+
+> 직접 빌드하려면 아래 [소스에서 빌드](#소스에서-빌드)를 참고하세요 — 결과물은 `target/release/minisync`에 생성됩니다.
 
 ---
 
@@ -35,14 +38,14 @@ minisync [--gui] <동기화폴더> <내_주소> [상대방_주소 ...]
 ### macOS (GUI 모드)
 
 ```bash
-./dist/minisync-macos --gui ~/Sync 0.0.0.0:9000
+./minisync-macos --gui ~/Sync 0.0.0.0:9000
 ```
 
 ### 우분투 / Linux
 
 ```bash
 # 1) 바이너리 복사
-scp dist/minisync-linux-amd64 ubuntu-server:~/minisync
+scp minisync-linux-amd64 ubuntu-server:~/minisync
 
 # 2) 실행 권한 부여
 ssh ubuntu-server "chmod +x ~/minisync"
@@ -57,7 +60,7 @@ ARM64 서버 (라즈베리파이, AWS Graviton 등)는 `minisync-linux-arm64`를
 
 ```bash
 # macOS (192.168.1.50)
-./dist/minisync-macos --gui ~/Sync 0.0.0.0:9000 192.168.1.100:9001
+./minisync-macos --gui ~/Sync 0.0.0.0:9000 192.168.1.100:9001
 
 # Ubuntu (192.168.1.100)
 ./minisync ~/Sync 0.0.0.0:9001 192.168.1.50:9000
@@ -84,7 +87,7 @@ ARM64 서버 (라즈베리파이, AWS Graviton 등)는 `minisync-linux-arm64`를
 
 ```bash
 # macOS
-./dist/minisync-macos --gui
+./minisync-macos --gui
 
 # Linux
 ./minisync
@@ -171,3 +174,26 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl
 - 수신 포트(예: 9000)가 방화벽에서 열려 있어야 합니다
 - 같은 LAN이면 사설 IP로 바로 연결
 - 인터넷 너머라면 포트포워딩 또는 Tailscale/WireGuard 등 VPN 사용
+
+### LAN 자동 발견
+
+같은 LAN의 노드들은 상대방 주소를 적지 않아도 UDP 비콘으로 서로를 찾아 자동 연결됩니다
+(포트 19531). 상대방 주소 인자는 생략 가능:
+
+```bash
+minisync ~/Sync 0.0.0.0:9000      # 같은 LAN의 다른 노드를 자동 발견
+```
+
+### lattice VPN 오버레이 (`--lattice`)
+
+[lattice](https://github.com/omnyx2) 메시 VPN 위에서 동기화할 수 있습니다. 각 노드의
+lattice 데몬에 질의해 연결된 피어의 가상 IP로 자동 연결합니다 — NAT 너머에서도 동작:
+
+```bash
+minisync --lattice ~/Sync 0.0.0.0:9000
+```
+
+- 모든 노드가 **같은 수신 포트**를 써야 합니다(피어를 `<가상IP>:<그 포트>`로 연결).
+- lattice 데몬이 실행 중이어야 하며, minisync 실행 파일 이름이 정확히 `minisync`여야
+  데몬의 health-check 게이트를 통과합니다.
+- `--lattice` 모드에서는 LAN UDP 자동 발견이 비활성화됩니다(오버레이가 유일 경로).
