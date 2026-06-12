@@ -4,6 +4,13 @@
 //!   minisync [--gui] <folder> <listen_addr> [peer1_addr] ...
 //!   minisync --gui                (uses saved settings from ~/.config/minisync/app.toml)
 
+// In the release GUI build, run as a Windows GUI subsystem app so double-clicking
+// from Explorer opens the window without flashing a console.
+#![cfg_attr(
+    all(target_os = "windows", feature = "gui", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use anyhow::Result;
 use rustls::{ClientConfig, ServerConfig};
 use std::collections::HashMap;
@@ -49,6 +56,7 @@ fn tcp_listener(addr: &str) -> std::io::Result<TcpListener> {
     sock.set_reuse_address(true)?;
     let mss = MSS_CLAMP.load(Ordering::Relaxed);
     if mss > 0 {
+        #[cfg(unix)]
         let _ = sock.set_mss(mss);
     }
     sock.bind(&sa.into())?;
@@ -71,6 +79,7 @@ fn tcp_connect(addr: &str) -> std::io::Result<TcpStream> {
     let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
     let mss = MSS_CLAMP.load(Ordering::Relaxed);
     if mss > 0 {
+        #[cfg(unix)]
         let _ = sock.set_mss(mss);
     }
     sock.connect(&sa.into())?;
@@ -108,6 +117,14 @@ fn main() -> Result<()> {
         MSS_CLAMP.store(1300, Ordering::Relaxed);
     }
 
+    // Explorer double-click (no positional args) on the GUI build: open the
+    // window instead of printing usage. Uses saved settings if present, else a
+    // default folder (the GUI's "Change..." button can pick another).
+    #[cfg(feature = "gui")]
+    if filtered_args.len() < 3 {
+        gui_mode = true;
+    }
+
     // Resolve settings: CLI args > saved AppConfig > show usage
     let (folder_str, listen_addr, peer_addrs) = if filtered_args.len() >= 3 {
         // CLI args provided
@@ -137,12 +154,8 @@ fn main() -> Result<()> {
         }
 
         (filtered_args[1].to_string(), listen, peers)
-    } else if let Some(app_cfg) = AppConfig::load() {
+    } else if let Some(app_cfg) = AppConfig::load().filter(|c| !c.sync_folder.is_empty()) {
         // No CLI args — use saved config
-        if app_cfg.sync_folder.is_empty() {
-            print_usage(&filtered_args[0]);
-            std::process::exit(1);
-        }
         println!(
             "[minisync] loaded settings from {}",
             AppConfig::config_path().display()
@@ -151,8 +164,19 @@ fn main() -> Result<()> {
         let peers: Vec<String> = app_cfg.peers.clone();
         (app_cfg.sync_folder, listen, peers)
     } else {
-        print_usage(&filtered_args[0]);
-        std::process::exit(1);
+        // First run with no settings. The GUI build falls back to a default
+        // folder so a double-click just works; the headless build shows usage.
+        #[cfg(feature = "gui")]
+        {
+            let folder = default_sync_folder();
+            println!("[minisync] first run — using default sync folder: {folder}");
+            (folder, "0.0.0.0:9000".to_string(), Vec::new())
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            print_usage(&filtered_args[0]);
+            std::process::exit(1);
+        }
     };
 
     std::fs::create_dir_all(&folder_str)?;
@@ -370,6 +394,11 @@ fn main() -> Result<()> {
     // daemon's health_check IPC and dials connected peers on their virtual IPs.
     // Requires all nodes to listen on the same port (peers are dialed at
     // <virtual_ip>:<this listen port>).
+    #[cfg(not(unix))]
+    if lattice_enabled {
+        eprintln!("[lattice] --lattice is not supported on this platform (requires a unix domain socket); ignoring");
+    }
+    #[cfg(unix)]
     if lattice_enabled {
         match listen_port {
             Some(port) => {
@@ -441,6 +470,16 @@ fn main() -> Result<()> {
 
     #[allow(unreachable_code)]
     Ok(())
+}
+
+/// Default sync folder used on first run when launched without arguments
+/// (e.g. double-clicked from Explorer): `<home>/MiniSync`.
+#[cfg(feature = "gui")]
+fn default_sync_folder() -> String {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join("MiniSync").display().to_string()
 }
 
 fn print_usage(prog: &str) {

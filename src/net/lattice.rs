@@ -29,6 +29,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::net::Ipv4Addr;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -57,7 +58,14 @@ struct RawResponse {
     data: serde_json::Value,
 }
 
+/// lattice IPC는 Unix 도메인 소켓 기반이라 비-Unix(Windows)에서는 사용 불가.
+#[cfg(not(unix))]
+fn query_health(_socket_path: &str) -> Result<Vec<HealthEntry>, String> {
+    Err("lattice IPC (unix domain socket) is not supported on this platform".to_string())
+}
+
 /// 데몬에 health_check 1회 질의. 성공 시 엔트리 목록 반환.
+#[cfg(unix)]
 fn query_health(socket_path: &str) -> Result<Vec<HealthEntry>, String> {
     let stream = UnixStream::connect(socket_path).map_err(|e| format!("connect {socket_path}: {e}"))?;
     stream.set_read_timeout(Some(IO_TIMEOUT)).ok();
