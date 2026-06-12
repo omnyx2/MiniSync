@@ -123,6 +123,21 @@ pub fn watch_loop(
                         continue;
                     }
                 }
+
+                // Selective-sync eviction: if the GUI just removed this as a local
+                // cache drop, do NOT delete it on peers — leave it as a reference.
+                let evicted = engine
+                    .as_ref()
+                    .map(|e| e.evicting.lock().unwrap().remove(&rel))
+                    .unwrap_or(false);
+                if evicted {
+                    println!("[watch] evicted local copy of {rel} (not propagating delete)");
+                    if let Some(eng) = &engine {
+                        eng.notify_gui(EngineEvent::CatalogUpdated);
+                    }
+                    continue;
+                }
+
                 seen.lock()
                     .unwrap()
                     .insert(rel.clone(), DELETED_HASH.to_string());

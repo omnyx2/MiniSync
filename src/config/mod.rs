@@ -51,7 +51,10 @@ pub struct SyncConfig {
 impl Default for SyncConfig {
     fn default() -> Self {
         SyncConfig {
-            default_mode: SyncMode::FullCopy,
+            // Selective sync by default: File-lane files (media, documents, etc.)
+            // are shared as references and only materialize on a node when the
+            // user downloads them. (CRDT text/code files still sync fully.)
+            default_mode: SyncMode::Reference,
             rules: Vec::new(),
         }
     }
@@ -98,8 +101,9 @@ mod tests {
     #[test]
     fn default_config() {
         let cfg = SyncConfig::default();
-        assert_eq!(cfg.default_mode, SyncMode::FullCopy);
-        assert_eq!(cfg.mode_for("anything.txt"), SyncMode::FullCopy);
+        // Selective sync default: Reference.
+        assert_eq!(cfg.default_mode, SyncMode::Reference);
+        assert_eq!(cfg.mode_for("anything.png"), SyncMode::Reference);
     }
 
     #[test]

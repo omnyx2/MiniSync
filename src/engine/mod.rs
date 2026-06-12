@@ -47,8 +47,11 @@ pub enum EngineEvent {
 /// Commands from the GUI to the engine.
 #[derive(Debug, Clone)]
 pub enum GuiCommand {
-    /// Request to download a reference-mode file.
+    /// Request to download (materialize) a reference-mode file onto this device.
     Download(String),
+    /// Remove the local copy of a file from THIS device only (selective sync).
+    /// Peers and the original are untouched — it stays as a downloadable reference.
+    RemoveLocal(String),
     /// Update the sync configuration.
     UpdateConfig(SyncConfig),
     /// Rescan the sync folder.
@@ -67,6 +70,10 @@ pub struct SyncEngine {
     pub catalog: Catalog,
     pub gui_tx: Option<Sender<EngineEvent>>,
     pub gui_rx: Option<Mutex<Receiver<GuiCommand>>>,
+    /// Paths currently being evicted locally (selective-sync "Remove"). The watch
+    /// loop checks this so a user eviction does NOT broadcast a delete to peers —
+    /// it's a local cache drop, not a network delete.
+    pub evicting: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Wakes the GUI to repaint immediately. Set once, after the GUI's egui
     /// context exists (the engine is built before the window). Without it, the
     /// GUI only repaints on its idle timer, so live updates lag by up to 500ms.

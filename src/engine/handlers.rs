@@ -84,7 +84,7 @@ pub fn handle_message(
             }
         }
         Message::RefIndex(ref_entries) => {
-            handle_ref_index(ref_entries, catalog, engine)?;
+            handle_ref_index(ref_entries, peer_conn, root, catalog, engine)?;
         }
         Message::DownloadRequest(path) => {
             handle_download_request(&path, peer_conn, root, peer_id)?;
@@ -344,8 +344,14 @@ fn handle_file(
 }
 
 /// Handle incoming reference index entries — update catalog with remote metadata.
+///
+/// Selective sync: if we already hold a LOCAL copy of a referenced file (the user
+/// downloaded/"selected" it) and the owner's version differs, auto-request the new
+/// version so our selected files stay in sync.
 fn handle_ref_index(
     ref_entries: Vec<RefEntry>,
+    peer_conn: &Arc<PeerConn>,
+    root: &Path,
     catalog: &Catalog,
     engine: Option<&SyncEngine>,
 ) -> Result<()> {
@@ -354,6 +360,16 @@ fn handle_ref_index(
             "[sync] received ref metadata: {} ({} bytes) from {} ({})",
             re.path, re.size, re.owner_name, re.owner_id
         );
+
+        // Already have it locally with a stale hash? It's a "selected" file — pull
+        // the update to keep it materialized and current.
+        if let Ok(mine) = entry_for(root, &re.path) {
+            if mine.hash != re.hash {
+                println!("[sync] selected file {} changed upstream — auto-downloading", re.path);
+                send_to_peer(peer_conn, &Message::DownloadRequest(re.path.clone()))?;
+            }
+        }
+
         catalog.upsert_remote(
             re.path,
             re.size,

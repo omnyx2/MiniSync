@@ -180,6 +180,29 @@ impl Catalog {
         }
     }
 
+    /// User evicted the local copy (selective sync "Remove from this device").
+    /// `Both` → `Remote` (keep it as a re-downloadable reference, peers untouched);
+    /// `Local`-only (no remote owners) → removed from the catalog entirely.
+    /// Returns true if a remote reference remains.
+    pub fn evict_local(&self, path: &str) -> bool {
+        let mut map = self.entries.write().unwrap();
+        let owners = match map.get(path) {
+            Some(e) => match &e.location {
+                FileLocation::Both { owners } => owners.clone(),
+                FileLocation::Remote { .. } => return true, // already a reference
+                FileLocation::Local => {
+                    map.remove(path);
+                    return false;
+                }
+            },
+            None => return false,
+        };
+        if let Some(e) = map.get_mut(path) {
+            e.location = FileLocation::Remote { owners };
+        }
+        true
+    }
+
     /// Mark a file as now also local (after download).
     pub fn mark_local(&self, path: &str) {
         let mut map = self.entries.write().unwrap();
@@ -286,6 +309,30 @@ mod tests {
         // Duplicate owner should not add twice
         cat.upsert_remote("f.pdf".into(), 100, "h".into(), node("p1", "PC1"), SyncMode::Reference);
         assert_eq!(cat.owners_of("f.pdf"), vec!["p1".to_string(), "p2".to_string()]);
+    }
+
+    #[test]
+    fn evict_local_downgrades_both_to_remote() {
+        let cat = Catalog::new();
+        // File exists locally AND on a peer → Both.
+        cat.upsert_local("doc.pdf".into(), 100, "h".into(), SyncMode::Reference);
+        cat.upsert_remote("doc.pdf".into(), 100, "h".into(), node("p1", "PC1"), SyncMode::Reference);
+        assert!(matches!(cat.snapshot()[0].location, FileLocation::Both { .. }));
+        // Evict local copy → stays as a remote reference (peer untouched).
+        assert!(cat.evict_local("doc.pdf"), "remote reference should remain");
+        match &cat.snapshot()[0].location {
+            FileLocation::Remote { owners } => assert_eq!(owners[0].node_id, "p1"),
+            other => panic!("expected Remote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evict_local_removes_local_only() {
+        let cat = Catalog::new();
+        cat.upsert_local("mine.bin".into(), 10, "h".into(), SyncMode::Reference);
+        // No remote owner → eviction removes it entirely, returns false.
+        assert!(!cat.evict_local("mine.bin"));
+        assert!(cat.snapshot().is_empty());
     }
 
     #[test]

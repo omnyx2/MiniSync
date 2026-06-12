@@ -145,15 +145,36 @@ pub fn file_browser_panel(
                     ui.label(mode_label(entry.sync_mode));
                     ui.label(location_label(&entry.location, self_node_name));
 
-                    match &entry.location {
-                        FileLocation::Remote { .. } => {
-                            if ui.button("Download").clicked() {
-                                let _ =
-                                    commands_tx.send(GuiCommand::Download(entry.path.clone()));
+                    // Action: selective-sync toggle.
+                    //  - CRDT (text/code) files always sync → no toggle.
+                    //  - File-lane references: Download (if not here) / Remove (if here).
+                    if crate::routing::lane_for(&entry.path) == crate::routing::Lane::Crdt {
+                        ui.weak("auto-sync");
+                    } else {
+                        match &entry.location {
+                            FileLocation::Remote { .. } => {
+                                if ui
+                                    .button("⬇ Download")
+                                    .on_hover_text("Download a copy onto this device")
+                                    .clicked()
+                                {
+                                    let _ = commands_tx
+                                        .send(GuiCommand::Download(entry.path.clone()));
+                                }
                             }
-                        }
-                        _ => {
-                            ui.label("");
+                            // Local or Both — we hold a copy; offer to drop it.
+                            _ => {
+                                if ui
+                                    .button("🗑 Remove")
+                                    .on_hover_text(
+                                        "Remove from THIS device only (kept on peers, re-downloadable)",
+                                    )
+                                    .clicked()
+                                {
+                                    let _ = commands_tx
+                                        .send(GuiCommand::RemoveLocal(entry.path.clone()));
+                                }
+                            }
                         }
                     }
                     ui.end_row();

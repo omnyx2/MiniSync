@@ -203,6 +203,7 @@ fn main() -> Result<()> {
             catalog: catalog.clone(),
             gui_tx: Some(etx),
             gui_rx: Some(Mutex::new(crx)),
+            evicting: Arc::new(Mutex::new(std::collections::HashSet::new())),
             repaint: std::sync::OnceLock::new(),
         });
         (Some(erx), Some(ctx), Some(engine))
@@ -487,6 +488,25 @@ fn gui_command_loop(engine: &SyncEngine, root: &std::path::Path) {
                     }
                 } else {
                     eprintln!("[gui] no owner found for {path}");
+                }
+            }
+            GuiCommand::RemoveLocal(path) => {
+                // Selective-sync eviction: drop our local copy only. Mark it in
+                // `evicting` FIRST so the watcher won't broadcast a delete, then
+                // remove the file and downgrade the catalog to a remote reference.
+                println!("[gui] remove-local requested: {path}");
+                engine.evicting.lock().unwrap().insert(path.clone());
+                let abs = root.join(&path);
+                match std::fs::remove_file(&abs) {
+                    Ok(()) => {
+                        engine.catalog.evict_local(&path);
+                        engine.seen.lock().unwrap().remove(&path);
+                        engine.notify_gui(minisync::engine::EngineEvent::CatalogUpdated);
+                    }
+                    Err(e) => {
+                        engine.evicting.lock().unwrap().remove(&path);
+                        eprintln!("[gui] remove-local failed for {path}: {e}");
+                    }
                 }
             }
             GuiCommand::UpdateConfig(new_config) => {
