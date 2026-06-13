@@ -6,7 +6,7 @@
 //! a breadcrumb bar walks back up.
 
 use eframe::egui;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::mpsc::Sender;
 
 use crate::catalog::{CatalogEntry, FileLocation, NodeInfo};
@@ -16,6 +16,8 @@ use crate::engine::GuiCommand;
 struct FolderRow {
     name: String,
     file_count: usize,
+    /// How many of those files are held locally (synced onto this device).
+    held_count: usize,
     total_size: u64,
 }
 
@@ -39,6 +41,7 @@ pub fn file_browser_panel(
     commands_tx: &Sender<GuiCommand>,
     self_node_name: &str,
     self_node_id: &str,
+    online_peers: &HashSet<String>,
     current_dir: &mut String,
     pending: &mut Option<PendingConfirm>,
 ) {
@@ -98,10 +101,17 @@ pub fn file_browser_panel(
                     .or_insert_with(|| FolderRow {
                         name: folder_name.to_string(),
                         file_count: 0,
+                        held_count: 0,
                         total_size: 0,
                     });
                 row.file_count += 1;
                 row.total_size += entry.size;
+                if matches!(
+                    entry.location,
+                    FileLocation::Local | FileLocation::Both { .. }
+                ) {
+                    row.held_count += 1;
+                }
             }
             None => {
                 // A file directly in the current directory.
@@ -124,8 +134,8 @@ pub fn file_browser_panel(
                 ui.strong("Name");
                 ui.strong("Size");
                 ui.strong("Location");
-                ui.strong("State");
-                ui.strong("Action");
+                ui.strong("Available");
+                ui.strong("Sync");
                 ui.strong("Delete");
                 ui.end_row();
 
@@ -144,9 +154,16 @@ pub fn file_browser_panel(
                     }
                     ui.label(format_size(folder.total_size));
                     ui.label(format!("{} item(s)", folder.file_count));
-                    ui.label("");
-                    ui.label("");
-                    ui.label("");
+                    ui.label(""); // Available: n/a for folders
+                    // Sync: how many sub-items are held here. Green when all synced.
+                    let all = folder.file_count > 0 && folder.held_count == folder.file_count;
+                    let txt = format!("{}/{} synced", folder.held_count, folder.file_count);
+                    if all {
+                        ui.colored_label(egui::Color32::from_rgb(60, 160, 60), txt);
+                    } else {
+                        ui.weak(txt);
+                    }
+                    ui.label(""); // no folder-level delete (avoid mass deletion)
                     ui.end_row();
                 }
 
@@ -172,49 +189,75 @@ pub fn file_browser_panel(
                         FileLocation::Local => 0,
                     };
                     let green = egui::Color32::from_rgb(60, 160, 60);
+                    let red = egui::Color32::from_rgb(200, 90, 90);
 
-                    // State column: pure presence indicator.
+                    // A file is fetchable only if WE already hold it, or some node
+                    // that holds it is currently online. If every holder is offline,
+                    // it can't be downloaded.
+                    let holder_online = match &entry.location {
+                        FileLocation::Remote { owners } | FileLocation::Both { owners } => {
+                            owners.iter().any(|o| online_peers.contains(&o.node_id))
+                        }
+                        FileLocation::Local => false,
+                    };
+                    let available = i_hold || holder_online;
+
+                    // Available column.
                     if i_hold {
-                        ui.colored_label(green, "✓");
+                        ui.colored_label(green, "✓ here");
+                    } else if available {
+                        ui.colored_label(green, "● online");
                     } else {
-                        ui.weak("ref");
+                        ui.colored_label(red, "unavailable")
+                            .on_hover_text("Every device that has this file is offline");
                     }
 
-                    // Action column: this-device sync control (get / drop a copy).
+                    // Sync column: a toggle — ON = keep a local copy, auto-updated
+                    // (green "auto-sync"); OFF = reference only. CRDT/text files are
+                    // always synced (shown as a locked green status, not a toggle).
                     if is_crdt {
-                        // CRDT files always sync; no per-device opt-out.
-                        ui.colored_label(green, "auto");
-                    } else if !i_hold {
-                        if ui
-                            .button("⬇ Download")
-                            .on_hover_text("Download a copy onto this device")
-                            .clicked()
-                        {
-                            let _ = commands_tx.send(GuiCommand::Download(entry.path.clone()));
-                        }
+                        ui.colored_label(green, "auto-sync").on_hover_text(
+                            "Text/CRDT file — auto-merged and kept on every device; can't disable",
+                        );
                     } else {
-                        let last_copy = other_holders == 0;
-                        let hover = if last_copy {
-                            "This is the LAST copy — removing deletes it everywhere"
+                        let mut on = i_hold;
+                        let label = if on {
+                            egui::RichText::new("auto-sync").color(green)
                         } else {
-                            "Remove from THIS device only (kept on peers, re-downloadable)"
+                            egui::RichText::new("off").weak()
                         };
-                        if ui.button("🗑 Remove").on_hover_text(hover).clicked() {
-                            if last_copy {
+                        // Can't turn ON (download) if no holder is online.
+                        let can_toggle = on || available;
+                        let hover = if !can_toggle {
+                            "Can't download — every device with this file is offline"
+                        } else if on {
+                            "Synced on this device — toggle off to keep only a reference"
+                        } else {
+                            "Reference only — toggle on to download & keep synced here"
+                        };
+                        let resp = ui
+                            .add_enabled(can_toggle, egui::Checkbox::new(&mut on, label))
+                            .on_hover_text(hover);
+                        if resp.changed() {
+                            if on {
+                                let _ = commands_tx.send(GuiCommand::Download(entry.path.clone()));
+                            } else if other_holders == 0 {
                                 *pending = Some(PendingConfirm {
                                     path: entry.path.clone(),
                                     last_copy: true,
                                 });
                             } else {
-                                let _ = commands_tx
-                                    .send(GuiCommand::RemoveLocal(entry.path.clone()));
+                                let _ =
+                                    commands_tx.send(GuiCommand::RemoveLocal(entry.path.clone()));
                             }
                         }
                     }
 
                     // Delete column: network-wide delete (distinct from Remove).
-                    let del = egui::Button::new("🗑")
-                        .fill(egui::Color32::from_rgb(90, 30, 30));
+                    // Red icon on a normal button — signals danger without a heavy fill.
+                    let del = egui::Button::new(
+                        egui::RichText::new("🗑").color(egui::Color32::from_rgb(210, 75, 75)),
+                    );
                     if ui
                         .add(del)
                         .on_hover_text("Delete everywhere — remove from ALL devices (cannot be undone)")

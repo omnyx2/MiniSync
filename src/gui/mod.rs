@@ -395,12 +395,15 @@ impl eframe::App for GuiApp {
 
         // Central panel: file browser
         egui::CentralPanel::default().show(ctx, |ui| {
+            let online_peers: std::collections::HashSet<String> =
+                peers.iter().map(|p| p.remote_id.clone()).collect();
             file_browser::file_browser_panel(
                 ui,
                 &entries,
                 &self.bridge.commands_tx,
                 &self.bridge.node_name,
                 &self.bridge.engine.peer_id,
+                &online_peers,
                 &mut self.current_dir,
                 &mut self.pending_confirm,
             );
