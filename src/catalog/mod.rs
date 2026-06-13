@@ -37,6 +37,8 @@ pub struct CatalogEntry {
     pub hash: String,
     pub location: FileLocation,
     pub sync_mode: SyncMode,
+    /// The file's original creator (immutable). `None` until learned.
+    pub origin: Option<NodeInfo>,
 }
 
 /// Thread-safe unified file catalog.
@@ -61,6 +63,7 @@ impl Catalog {
             hash: hash.clone(),
             location: FileLocation::Local,
             sync_mode,
+            origin: None,
         });
         entry.size = size;
         entry.hash = hash;
@@ -95,6 +98,7 @@ impl Catalog {
                 owners: Vec::new(),
             },
             sync_mode,
+            origin: None,
         });
         entry.size = size;
         entry.hash = hash;
@@ -201,6 +205,56 @@ impl Catalog {
             e.location = FileLocation::Remote { owners };
         }
         true
+    }
+
+    /// Record a file's origin (creator). Immutable in spirit: once set it only
+    /// changes to a *smaller* node_id, so independent concurrent creations on
+    /// different nodes converge to the same origin fleet-wide.
+    pub fn set_origin(&self, path: &str, origin: NodeInfo) {
+        let mut map = self.entries.write().unwrap();
+        if let Some(entry) = map.get_mut(path) {
+            let replace = match &entry.origin {
+                None => true,
+                Some(cur) => origin.node_id < cur.node_id,
+            };
+            if replace {
+                entry.origin = Some(origin);
+            }
+        }
+    }
+
+    /// Add a remote holder (a peer that now has a local copy) to an existing
+    /// entry. No-op if the path is unknown. `Local` → `Both`.
+    pub fn add_holder(&self, path: &str, holder: NodeInfo) {
+        let mut map = self.entries.write().unwrap();
+        let Some(entry) = map.get_mut(path) else { return };
+        match &mut entry.location {
+            FileLocation::Remote { owners } | FileLocation::Both { owners } => {
+                if let Some(existing) = owners.iter_mut().find(|o| o.node_id == holder.node_id) {
+                    existing.node_name = holder.node_name;
+                } else {
+                    owners.push(holder);
+                }
+            }
+            FileLocation::Local => {
+                entry.location = FileLocation::Both {
+                    owners: vec![holder],
+                };
+            }
+        }
+    }
+
+    /// Remove a remote holder (a peer dropped its copy). `Both` stays `Both`/
+    /// `Local` view of self is unaffected; `Remote` may end with zero holders.
+    pub fn remove_holder(&self, path: &str, node_id: &str) {
+        let mut map = self.entries.write().unwrap();
+        let Some(entry) = map.get_mut(path) else { return };
+        match &mut entry.location {
+            FileLocation::Remote { owners } | FileLocation::Both { owners } => {
+                owners.retain(|o| o.node_id != node_id);
+            }
+            FileLocation::Local => {}
+        }
     }
 
     /// Mark a file as now also local (after download).
@@ -333,6 +387,35 @@ mod tests {
         // No remote owner → eviction removes it entirely, returns false.
         assert!(!cat.evict_local("mine.bin"));
         assert!(cat.snapshot().is_empty());
+    }
+
+    #[test]
+    fn origin_is_immutable_smaller_id_wins() {
+        let cat = Catalog::new();
+        cat.upsert_remote("f".into(), 1, "h".into(), node("m", "Mid"), SyncMode::Reference);
+        cat.set_origin("f", node("m", "Mid"));
+        assert_eq!(cat.snapshot()[0].origin.as_ref().unwrap().node_id, "m");
+        // A larger id must NOT override.
+        cat.set_origin("f", node("z", "Zed"));
+        assert_eq!(cat.snapshot()[0].origin.as_ref().unwrap().node_id, "m");
+        // A smaller id wins (deterministic convergence for concurrent creation).
+        cat.set_origin("f", node("a", "Ann"));
+        assert_eq!(cat.snapshot()[0].origin.as_ref().unwrap().node_id, "a");
+    }
+
+    #[test]
+    fn add_and_remove_holder() {
+        let cat = Catalog::new();
+        cat.upsert_local("f".into(), 1, "h".into(), SyncMode::FullCopy); // Local
+        cat.add_holder("f", node("p1", "PC1")); // Local → Both
+        assert!(matches!(cat.snapshot()[0].location, FileLocation::Both { .. }));
+        assert_eq!(cat.owners_of("f"), vec!["p1".to_string()]);
+        // A downloader that drops its copy is removed from holders.
+        cat.remove_holder("f", "p1");
+        assert!(cat.owners_of("f").is_empty());
+        // add_holder on an unknown path is a no-op (doesn't create entries).
+        cat.add_holder("ghost", node("p2", "PC2"));
+        assert!(cat.owners_of("ghost").is_empty());
     }
 
     #[test]

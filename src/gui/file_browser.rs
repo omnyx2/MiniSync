@@ -9,7 +9,7 @@ use eframe::egui;
 use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
 
-use crate::catalog::{CatalogEntry, FileLocation};
+use crate::catalog::{CatalogEntry, FileLocation, NodeInfo};
 use crate::engine::GuiCommand;
 
 /// Aggregated info about a sub-folder directly under the current directory.
@@ -54,6 +54,7 @@ pub fn file_browser_panel(
     entries: &[CatalogEntry],
     commands_tx: &Sender<GuiCommand>,
     self_node_name: &str,
+    self_node_id: &str,
     current_dir: &mut String,
     pending: &mut Option<PendingConfirm>,
 ) {
@@ -168,7 +169,7 @@ pub fn file_browser_panel(
                     let name = file_name_of(&entry.path);
                     ui.label(format!("📄 {name}"));
                     ui.label(format_size(entry.size));
-                    ui.label(location_label(&entry.location, self_node_name));
+                    location_cell(ui, entry, self_node_id, self_node_name);
 
                     let is_crdt =
                         crate::routing::lane_for(&entry.path) == crate::routing::Lane::Crdt;
@@ -253,23 +254,50 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn location_label(loc: &FileLocation, self_node_name: &str) -> String {
-    match loc {
-        FileLocation::Local => self_node_name.to_string(),
-        FileLocation::Remote { owners } => {
-            let names: Vec<&str> = owners.iter().map(|o| o.node_name.as_str()).collect();
-            if names.is_empty() {
-                "remote".to_string()
-            } else {
-                names.join(", ")
-            }
-        }
-        FileLocation::Both { owners } => {
-            let mut names = vec![self_node_name];
-            for o in owners {
-                names.push(&o.node_name);
-            }
-            names.join(", ")
-        }
+/// Render the Location cell: the file's ORIGIN (creator) plus the total holder
+/// count, with a dropdown listing every node that currently holds a copy. If the
+/// origin no longer keeps a local copy it's marked "(no copy)".
+fn location_cell(ui: &mut egui::Ui, entry: &CatalogEntry, self_id: &str, self_name: &str) {
+    let (i_hold, owners): (bool, &[NodeInfo]) = match &entry.location {
+        FileLocation::Local => (true, &[]),
+        FileLocation::Remote { owners } => (false, owners.as_slice()),
+        FileLocation::Both { owners } => (true, owners.as_slice()),
+    };
+
+    // Every node that currently holds a copy (self first, if we do).
+    let mut holders: Vec<String> = Vec::new();
+    if i_hold {
+        holders.push(format!("{self_name} (this device)"));
     }
+    holders.extend(owners.iter().map(|o| o.node_name.clone()));
+    let count = holders.len();
+
+    let origin_txt = match &entry.origin {
+        Some(o) => {
+            let origin_holds =
+                (i_hold && o.node_id == self_id) || owners.iter().any(|h| h.node_id == o.node_id);
+            if origin_holds {
+                o.node_name.clone()
+            } else {
+                format!("{} (no copy)", o.node_name)
+            }
+        }
+        // Legacy entry with no recorded origin → fall back to first holder.
+        None => holders.first().cloned().unwrap_or_else(|| "unknown".to_string()),
+    };
+
+    ui.menu_button(format!("{origin_txt} ({count})"), |ui| {
+        if let Some(o) = &entry.origin {
+            ui.label(format!("Origin: {}", o.node_name));
+            ui.separator();
+        }
+        ui.label("Holders:");
+        if holders.is_empty() {
+            ui.weak("(none — no copy anywhere)");
+        } else {
+            for h in &holders {
+                ui.label(format!("• {h}"));
+            }
+        }
+    });
 }

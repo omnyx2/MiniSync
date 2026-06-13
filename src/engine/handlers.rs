@@ -20,6 +20,17 @@ use crate::protocol::{Message, RefEntry};
 use crate::routing::{self, Lane};
 use std::sync::RwLock;
 
+/// Persist a learned origin (immutable creator) to disk if not already recorded,
+/// and reflect it in the catalog. An existing on-disk record always wins.
+fn adopt_origin(root: &Path, catalog: &Catalog, path: &str, origin: &Option<NodeInfo>) {
+    if let Some(o) = origin {
+        if crate::index::load_origin(root, path).is_none() {
+            crate::index::save_origin(root, path, o);
+        }
+        catalog.set_origin(path, o.clone());
+    }
+}
+
 /// Dispatch an incoming message to the appropriate handler.
 pub fn handle_message(
     msg: Message,
@@ -89,6 +100,16 @@ pub fn handle_message(
         Message::DownloadRequest(path) => {
             handle_download_request(&path, peer_conn, root, peer_id)?;
         }
+        Message::HolderUpdate { path, node, present } => {
+            if present {
+                catalog.add_holder(&path, node);
+            } else {
+                catalog.remove_holder(&path, &node.node_id);
+            }
+            if let Some(eng) = engine {
+                eng.notify_gui(EngineEvent::CatalogUpdated);
+            }
+        }
     }
     Ok(())
 }
@@ -109,6 +130,12 @@ fn handle_index(
     let cfg = config.read().unwrap().clone();
 
     for e in &entries {
+        // The sender has this file locally → it's a holder. Learn the origin too.
+        // (add_holder is a no-op until we track the path; the branches below and
+        // handle_file establish the entry, after which holders/origin stick.)
+        catalog.add_holder(&e.path, remote_node.clone());
+        adopt_origin(root, catalog, &e.path, &e.origin);
+
         // Check if this file is in reference mode for the remote peer
         let mode = cfg.mode_for(&e.path);
 
@@ -121,6 +148,7 @@ fn handle_index(
                 remote_node.clone(),
                 SyncMode::Reference,
             );
+            adopt_origin(root, catalog, &e.path, &e.origin);
             continue;
         }
 
@@ -189,6 +217,7 @@ fn handle_index(
                         mtime: fe.mtime,
                         owner_id: peer_id.to_string(),
                         owner_name: node_name.to_string(),
+                        origin: fe.origin.clone(),
                     });
                 }
             }
@@ -255,6 +284,13 @@ fn handle_file(
     catalog: &Catalog,
     engine: Option<&SyncEngine>,
 ) -> Result<()> {
+    // Capture before `entry` is consumed by the branches below.
+    let path = entry.path.clone();
+    let origin = entry.origin.clone();
+    // Learn the origin and record that the sender holds this file.
+    adopt_origin(root, catalog, &path, &origin);
+    catalog.add_holder(&path, remote_node.clone());
+
     let local = entry_for(root, &entry.path).ok();
 
     match local {
@@ -346,6 +382,23 @@ fn handle_file(
             }
         }
     }
+
+    // If we now hold the file locally, make the origin stick (entry exists) and
+    // announce our new holdership so every peer's holder set stays live.
+    if entry_for(root, &path).is_ok() {
+        adopt_origin(root, catalog, &path, &origin);
+        if let Some(eng) = engine {
+            let me = NodeInfo {
+                node_id: eng.peer_id.clone(),
+                node_name: eng.node_name.clone(),
+            };
+            eng.registry.broadcast(&Message::HolderUpdate {
+                path: path.clone(),
+                node: me,
+                present: true,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -376,6 +429,8 @@ fn handle_ref_index(
             }
         }
 
+        let path = re.path.clone();
+        let origin = re.origin.clone();
         catalog.upsert_remote(
             re.path,
             re.size,
@@ -386,6 +441,7 @@ fn handle_ref_index(
             },
             SyncMode::Reference,
         );
+        adopt_origin(root, catalog, &path, &origin);
     }
     if let Some(eng) = engine {
         eng.notify_gui(EngineEvent::CatalogUpdated);

@@ -29,8 +29,12 @@ pub fn catalog_scan_loop(
     config: Arc<RwLock<SyncConfig>>,
     engine: Option<Arc<SyncEngine>>,
 ) {
+    let self_node = engine.as_ref().map(|e| crate::catalog::NodeInfo {
+        node_id: e.peer_id.clone(),
+        node_name: e.node_name.clone(),
+    });
     loop {
-        scan_once(&root, &catalog, &config);
+        scan_once(&root, &catalog, &config, self_node.as_ref());
         // 디스크 변화를 GUI가 바로 반영하도록 알림 + 영속화.
         if let Some(eng) = &engine {
             eng.notify_gui(EngineEvent::CatalogUpdated);
@@ -41,7 +45,12 @@ pub fn catalog_scan_loop(
 }
 
 /// 한 번 스캔: 현재 존재하는 파일을 카탈로그에 반영하고 사라진 것을 정리.
-fn scan_once(root: &PathBuf, catalog: &Catalog, config: &Arc<RwLock<SyncConfig>>) {
+fn scan_once(
+    root: &PathBuf,
+    catalog: &Catalog,
+    config: &Arc<RwLock<SyncConfig>>,
+    self_node: Option<&crate::catalog::NodeInfo>,
+) {
     let mut present: HashSet<String> = HashSet::new();
 
     for entry in walkdir::WalkDir::new(root.as_path())
@@ -52,7 +61,9 @@ fn scan_once(root: &PathBuf, catalog: &Catalog, config: &Arc<RwLock<SyncConfig>>
             continue;
         }
         let rel = match entry.path().strip_prefix(root.as_path()) {
-            Ok(p) => p.to_string_lossy().replace('\\', "/"),
+            // Same NFC normalization as build_index/watch so a Korean filename
+            // doesn't get a divergent NFD catalog key (which would duplicate rows).
+            Ok(p) => crate::index::normalize_rel(&p.to_string_lossy()),
             Err(_) => continue,
         };
         if routing::is_minisync_internal(&rel) {
@@ -75,7 +86,18 @@ fn scan_once(root: &PathBuf, catalog: &Catalog, config: &Arc<RwLock<SyncConfig>>
         // 신규/변경/원격→로컬 전환 파일만 해시하여 반영.
         if let Ok(fe) = entry_for(root, &rel) {
             let mode = config.read().unwrap().mode_for(&rel);
-            catalog.upsert_local(rel, fe.size, fe.hash, mode);
+            catalog.upsert_local(rel.clone(), fe.size, fe.hash, mode);
+            // Origin: adopt the recorded one, or stamp ourselves for a file we
+            // hold with no origin yet (we introduced it to the mesh).
+            match fe.origin {
+                Some(o) => catalog.set_origin(&rel, o),
+                None => {
+                    if let Some(me) = self_node {
+                        crate::index::save_origin(root, &rel, me);
+                        catalog.set_origin(&rel, me.clone());
+                    }
+                }
+            }
         }
     }
 

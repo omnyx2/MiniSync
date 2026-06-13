@@ -9,6 +9,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
+use crate::catalog::NodeInfo;
 use crate::index::FileEntry;
 
 /// Everything one peer can say to the other.
@@ -33,6 +34,13 @@ pub enum Message {
     RefIndex(Vec<RefEntry>),
     /// Request to download a reference-only file from the owner peer.
     DownloadRequest(String),
+    /// "I now hold (present=true) / no longer hold (present=false) this file."
+    /// Lets peers keep the holder set live as copies are downloaded or evicted.
+    HolderUpdate {
+        path: String,
+        node: NodeInfo,
+        present: bool,
+    },
 }
 
 /// Metadata for a reference-mode file (no contents transferred).
@@ -44,6 +52,9 @@ pub struct RefEntry {
     pub mtime: i64,
     pub owner_id: String,
     pub owner_name: String,
+    /// The file's original creator (immutable). `None` for legacy entries.
+    #[serde(default)]
+    pub origin: Option<NodeInfo>,
 }
 
 /// Write one length-prefixed message.

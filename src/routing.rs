@@ -65,6 +65,11 @@ pub fn version_path(root: &Path, rel: &str) -> PathBuf {
     root.join(MINISYNC_DIR).join("versions").join(format!("{rel}.vv"))
 }
 
+/// `.minisync/origins/<rel>.origin` 경로 (파일의 최초 생성자, 불변).
+pub fn origin_path(root: &Path, rel: &str) -> PathBuf {
+    root.join(MINISYNC_DIR).join("origins").join(format!("{rel}.origin"))
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {

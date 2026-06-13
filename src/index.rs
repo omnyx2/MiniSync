@@ -12,6 +12,7 @@ use std::path::Path;
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
+use crate::catalog::NodeInfo;
 use crate::routing;
 
 /// Canonicalize a relative path string for the wire/catalog: forward slashes +
@@ -36,6 +37,11 @@ pub struct FileEntry {
     /// Version vector: peer_id → edit count. Used by the file lane to detect
     /// concurrent modifications vs. strictly-newer updates.
     pub version: HashMap<String, u64>,
+    /// The file's original creator (immutable). Travels with the entry so every
+    /// node agrees on where a file came from, regardless of who downloaded it.
+    /// `None` for legacy files created before origin tracking.
+    #[serde(default)]
+    pub origin: Option<NodeInfo>,
 }
 
 /// Map of relative-path -> entry. The whole-folder snapshot.
@@ -97,7 +103,34 @@ pub fn entry_for(root: &Path, rel: &str) -> Result<FileEntry> {
     let bytes = fs::read(&abs)?;
     let hash = format!("{:x}", Sha256::digest(&bytes));
     let version = load_version(root, rel);
-    Ok(FileEntry { path: rel.to_string(), size: meta.len(), mtime, hash, version })
+    let origin = load_origin(root, rel);
+    Ok(FileEntry { path: rel.to_string(), size: meta.len(), mtime, hash, version, origin })
+}
+
+// ── origin (immutable creator) ───────────────────────────────────────────────
+
+/// Load a file's recorded origin from `.minisync/origins/<rel>.origin`
+/// (`node_id` on the first line, `node_name` on the second). None if unrecorded.
+pub fn load_origin(root: &Path, rel: &str) -> Option<NodeInfo> {
+    let p = routing::origin_path(root, rel);
+    let content = fs::read_to_string(&p).ok()?;
+    let mut lines = content.lines();
+    let node_id = lines.next()?.trim().to_string();
+    if node_id.is_empty() {
+        return None;
+    }
+    let node_name = lines.next().unwrap_or("").trim().to_string();
+    Some(NodeInfo { node_id, node_name })
+}
+
+/// Record a file's origin on disk. Idempotent caller-side: only write when unset
+/// (origin is immutable) — callers check [`load_origin`] first.
+pub fn save_origin(root: &Path, rel: &str, origin: &NodeInfo) {
+    let p = routing::origin_path(root, rel);
+    if let Some(parent) = p.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&p, format!("{}\n{}", origin.node_id, origin.node_name));
 }
 
 // ── version vector ─────────────────────────────────────────────────────────

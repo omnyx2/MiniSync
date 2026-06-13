@@ -558,6 +558,18 @@ fn gui_command_loop(engine: &SyncEngine, root: &std::path::Path) {
                     Ok(()) => {
                         engine.catalog.evict_local(&path);
                         engine.seen.lock().unwrap().remove(&path);
+                        // Tell peers we no longer hold a copy so they drop us from
+                        // the holder set (we stay a downloader, not an owner).
+                        engine.registry.broadcast(
+                            &minisync::protocol::Message::HolderUpdate {
+                                path: path.clone(),
+                                node: minisync::catalog::NodeInfo {
+                                    node_id: engine.peer_id.clone(),
+                                    node_name: engine.node_name.clone(),
+                                },
+                                present: false,
+                            },
+                        );
                         engine.notify_gui(minisync::engine::EngineEvent::CatalogUpdated);
                     }
                     Err(e) => {

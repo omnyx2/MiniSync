@@ -17,6 +17,8 @@ struct StoredEntry {
     owners: Vec<NodeInfo>,
     is_local: bool,
     sync_mode: SyncMode,
+    #[serde(default)]
+    origin: Option<NodeInfo>,
 }
 
 /// Save the catalog state to disk.
@@ -37,6 +39,7 @@ pub fn save_catalog(root: &Path, catalog: &super::Catalog) {
                 owners,
                 is_local,
                 sync_mode: e.sync_mode,
+                origin: e.origin,
             }
         })
         .collect();
@@ -73,6 +76,9 @@ pub fn load_catalog(root: &Path, catalog: &super::Catalog) {
                 owner,
                 e.sync_mode,
             );
+        }
+        if let Some(origin) = e.origin {
+            catalog.set_origin(&e.path, origin);
         }
     }
 }

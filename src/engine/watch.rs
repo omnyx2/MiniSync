@@ -38,12 +38,24 @@ pub fn watch_loop(
                 if rel.is_empty() || routing::is_minisync_internal(&rel) {
                     continue;
                 }
-                let entry = match entry_for(&root, &rel) {
+                let mut entry = match entry_for(&root, &rel) {
                     Ok(e) => e,
                     Err(_) => continue,
                 };
                 if seen.lock().unwrap().get(&rel) == Some(&entry.hash) {
                     continue;
+                }
+
+                // First time we see this file locally with no recorded origin →
+                // we created it, so stamp ourselves as the origin (immutable).
+                if entry.origin.is_none() {
+                    let me = crate::catalog::NodeInfo {
+                        node_id: peer_id.clone(),
+                        node_name: node_name.clone(),
+                    };
+                    crate::index::save_origin(&root, &rel, &me);
+                    catalog.set_origin(&rel, me.clone());
+                    entry.origin = Some(me);
                 }
 
                 let lane = routing::lane_for(&rel);
@@ -91,6 +103,7 @@ pub fn watch_loop(
                                 mtime: entry.mtime,
                                 owner_id: peer_id.clone(),
                                 owner_name: node_name.clone(),
+                                origin: entry.origin.clone(),
                             };
                             println!("[watch] sending ref metadata for {rel}");
                             registry.broadcast(&Message::RefIndex(vec![ref_entry]));

@@ -341,6 +341,7 @@ impl eframe::App for GuiApp {
                 &entries,
                 &self.bridge.commands_tx,
                 &self.bridge.node_name,
+                &self.bridge.engine.peer_id,
                 &mut self.current_dir,
                 &mut self.pending_confirm,
             );
