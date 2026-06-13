@@ -62,14 +62,17 @@ pub fn run_peer_session(
     // 3) Channel for outbound messages (broadcast/unicast feed this; pump drains it)
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
 
-    // 4) Atomic 등록 (이미 같은 peer_id가 있으면 거부)
-    let (conn_id, peer_conn) = match registry.add_if_new(remote_id.clone(), remote_name.clone(), tx) {
-        Some(pair) => pair,
-        None => {
-            println!("[minisync] already connected to {remote_id}, closing duplicate");
-            return Ok(());
-        }
-    };
+    // 4) Atomic 등록 + 결정적 중복연결 해소 (peers::add_if_new 참고).
+    //    동시 connect로 생긴 두 연결 중 "작은 peer_id가 client인 쪽"만 양 노드가
+    //    일관되게 살린다. 비선호 연결은 거부(여기서 close)된다.
+    let (conn_id, peer_conn) =
+        match registry.add_if_new(remote_id.clone(), remote_name.clone(), !is_server, &peer_id, tx) {
+            Some(pair) => pair,
+            None => {
+                println!("[minisync] duplicate connection to {remote_id}, dropping (non-preferred)");
+                return Ok(());
+            }
+        };
     println!(
         "[minisync] registered conn_id={conn_id}, peers={}",
         registry.count()
@@ -148,6 +151,12 @@ fn pump_loop(
     let mut tmp = [0u8; 16384];
 
     loop {
+        // (0) 중복연결 해소로 축출되었으면 즉시 종료 (소켓 닫힘).
+        if peer_conn.evicted.load(std::sync::atomic::Ordering::SeqCst) {
+            println!("[minisync] conn to {remote_id} evicted (duplicate resolved)");
+            return Ok(());
+        }
+
         let mut did_work = false;
 
         // (a) 아웃바운드 메시지를 rustls 송신 버퍼에 적재 (소켓 I/O 없음)
