@@ -31,6 +31,8 @@ pub struct GuiApp {
     show_conflicts: bool,
     /// A destructive delete awaiting confirmation (set by the file browser).
     pending_confirm: Option<PendingConfirm>,
+    /// Whether the change-history window is open.
+    show_history: bool,
 }
 
 impl GuiApp {
@@ -45,6 +47,7 @@ impl GuiApp {
             conflicts: Vec::new(),
             show_conflicts: false,
             pending_confirm: None,
+            show_history: false,
         }
     }
 
@@ -191,6 +194,22 @@ fn open_in_file_manager(path: &Path) {
     }
 }
 
+/// Human-readable relative time, e.g. "just now", "5m ago", "2h ago", "3d ago".
+fn format_ago(now: i64, then: i64) -> String {
+    let secs = (now - then).max(0);
+    if secs < 10 {
+        "just now".to_string()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
 /// Show a native folder picker dialog. Returns the selected path, or None.
 fn pick_folder(current: &Path) -> Option<std::path::PathBuf> {
     rfd::FileDialog::new()
@@ -217,6 +236,9 @@ impl eframe::App for GuiApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Settings").clicked() {
                         self.show_settings = !self.show_settings;
+                    }
+                    if ui.button("History").clicked() {
+                        self.show_history = !self.show_history;
                     }
                 });
             });
@@ -331,6 +353,43 @@ impl eframe::App for GuiApp {
                         &mut self.bridge.node_name,
                         &mut self.status_message,
                     );
+                });
+        }
+
+        // Change-history window: who changed what, when.
+        if self.show_history {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let entries = self.bridge.engine.history.recent(300);
+            egui::Window::new("Change history")
+                .open(&mut self.show_history)
+                .default_width(460.0)
+                .show(ctx, |ui| {
+                    if entries.is_empty() {
+                        ui.weak("No changes recorded yet.");
+                        return;
+                    }
+                    egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                        egui::Grid::new("history_grid")
+                            .striped(true)
+                            .num_columns(4)
+                            .show(ui, |ui| {
+                                ui.strong("When");
+                                ui.strong("Who");
+                                ui.strong("Action");
+                                ui.strong("File");
+                                ui.end_row();
+                                for e in &entries {
+                                    ui.label(format_ago(now, e.ts));
+                                    ui.label(&e.node_name);
+                                    ui.label(&e.action);
+                                    ui.label(&e.path);
+                                    ui.end_row();
+                                }
+                            });
+                    });
                 });
         }
 

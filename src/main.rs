@@ -225,6 +225,7 @@ fn main() -> Result<()> {
             docs: Arc::clone(&docs),
             config: Arc::clone(&config),
             catalog: catalog.clone(),
+            history: minisync::engine::history::History::new(Arc::clone(&root)),
             gui_tx: Some(etx),
             gui_rx: Some(Mutex::new(crx)),
             evicting: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -596,6 +597,9 @@ fn gui_command_loop(engine: &SyncEngine, root: &std::path::Path) {
                 engine
                     .registry
                     .broadcast(&minisync::protocol::Message::Delete(path.clone()));
+                engine
+                    .history
+                    .record(&engine.peer_id, &engine.node_name, "deleted", &path);
                 engine.notify_gui(minisync::engine::EngineEvent::CatalogUpdated);
             }
             GuiCommand::UpdateConfig(new_config) => {

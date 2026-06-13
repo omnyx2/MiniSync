@@ -72,6 +72,8 @@ pub fn handle_message(
             }
             catalog.remove(path);
             if let Some(eng) = engine {
+                eng.history
+                    .record(&remote_node.node_id, &remote_node.node_name, "deleted", path);
                 eng.notify_gui(EngineEvent::CatalogUpdated);
             }
         }
@@ -80,8 +82,10 @@ pub fn handle_message(
             // CRDT files are always FullCopy
             let size = fs::metadata(root.join(&path)).map(|m| m.len()).unwrap_or(0);
             let hash = seen.lock().unwrap().get(&path).cloned().unwrap_or_default();
-            catalog.upsert_local(path, size, hash, SyncMode::FullCopy);
+            catalog.upsert_local(path.clone(), size, hash, SyncMode::FullCopy);
             if let Some(eng) = engine {
+                eng.history
+                    .record(&remote_node.node_id, &remote_node.node_name, "modified", &path);
                 eng.notify_gui(EngineEvent::CatalogUpdated);
             }
         }
@@ -89,8 +93,10 @@ pub fn handle_message(
             handle_crdt_changes(&path, &changes, root, seen, docs, peer_conn)?;
             let size = fs::metadata(root.join(&path)).map(|m| m.len()).unwrap_or(0);
             let hash = seen.lock().unwrap().get(&path).cloned().unwrap_or_default();
-            catalog.upsert_local(path, size, hash, SyncMode::FullCopy);
+            catalog.upsert_local(path.clone(), size, hash, SyncMode::FullCopy);
             if let Some(eng) = engine {
+                eng.history
+                    .record(&remote_node.node_id, &remote_node.node_name, "modified", &path);
                 eng.notify_gui(EngineEvent::CatalogUpdated);
             }
         }
@@ -305,6 +311,8 @@ fn handle_file(
             let mode = config.read().unwrap().mode_for(&entry.path);
             catalog.upsert_local(entry.path, entry.size, entry.hash, mode);
             if let Some(eng) = engine {
+                eng.history
+                    .record(&remote_node.node_id, &remote_node.node_name, "added", &path);
                 eng.notify_gui(EngineEvent::CatalogUpdated);
             }
         }
@@ -349,6 +357,12 @@ fn handle_file(
                         mode,
                     );
                     if let Some(eng) = engine {
+                        eng.history.record(
+                            &remote_node.node_id,
+                            &remote_node.node_name,
+                            "modified",
+                            &path,
+                        );
                         eng.notify_gui(EngineEvent::CatalogUpdated);
                     }
                 }

@@ -7,6 +7,7 @@
 //!   - transfer: file I/O helpers (apply, hash, conflict)
 
 pub mod handlers;
+pub mod history;
 pub mod scan;
 pub mod session;
 pub mod transfer;
@@ -74,6 +75,8 @@ pub struct SyncEngine {
     pub docs: CrdtDocs,
     pub config: Arc<RwLock<SyncConfig>>,
     pub catalog: Catalog,
+    /// Append-only "who changed what, when" log shown in the GUI.
+    pub history: history::History,
     pub gui_tx: Option<Sender<EngineEvent>>,
     pub gui_rx: Option<Mutex<Receiver<GuiCommand>>>,
     /// Paths currently being evicted locally (selective-sync "Remove"). The watch

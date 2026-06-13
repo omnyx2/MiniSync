@@ -58,6 +58,16 @@ pub fn watch_loop(
                     entry.origin = Some(me);
                 }
 
+                // Log this local change (변경자 = self) for the history view.
+                if let Some(eng) = &engine {
+                    let action = if seen.lock().unwrap().contains_key(&rel) {
+                        "modified"
+                    } else {
+                        "added"
+                    };
+                    eng.history.record(&peer_id, &node_name, action, &rel);
+                }
+
                 let lane = routing::lane_for(&rel);
                 let mode = config.read().unwrap().mode_for(&rel);
 
@@ -159,6 +169,7 @@ pub fn watch_loop(
 
                 catalog.remove(&rel);
                 if let Some(eng) = &engine {
+                    eng.history.record(&peer_id, &node_name, "deleted", &rel);
                     eng.notify_gui(EngineEvent::CatalogUpdated);
                 }
             }
