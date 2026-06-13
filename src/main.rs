@@ -211,11 +211,18 @@ fn main() -> Result<()> {
     let catalog = Catalog::new();
     minisync::catalog::store::load_catalog(&root, &catalog);
 
-    // GUI channels (if --gui mode)
+    // The engine exists on EVERY node (not just GUI) so headless nodes also
+    // record & share change history and announce holdership. GUI channels are
+    // wired only in --gui mode.
     #[allow(unused_variables)]
-    let (gui_tx, gui_rx, engine_arc) = if gui_mode {
-        let (etx, erx) = std::sync::mpsc::channel();
-        let (ctx, crx) = std::sync::mpsc::channel();
+    let (gui_tx, gui_rx, engine_arc) = {
+        let (event_tx, event_rx, cmd_tx, cmd_rx) = if gui_mode {
+            let (etx, erx) = std::sync::mpsc::channel();
+            let (ctx, crx) = std::sync::mpsc::channel();
+            (Some(etx), Some(erx), Some(ctx), Some(crx))
+        } else {
+            (None, None, None, None)
+        };
         let engine = Arc::new(SyncEngine {
             root: Arc::clone(&root),
             peer_id: peer_id.clone(),
@@ -226,14 +233,12 @@ fn main() -> Result<()> {
             config: Arc::clone(&config),
             catalog: catalog.clone(),
             history: minisync::engine::history::History::new(Arc::clone(&root)),
-            gui_tx: Some(etx),
-            gui_rx: Some(Mutex::new(crx)),
+            gui_tx: event_tx,
+            gui_rx: cmd_rx.map(Mutex::new),
             evicting: Arc::new(Mutex::new(std::collections::HashSet::new())),
             repaint: std::sync::OnceLock::new(),
         });
-        (Some(erx), Some(ctx), Some(engine))
-    } else {
-        (None, None, None)
+        (event_rx, cmd_tx, Some(engine))
     };
 
     println!(
@@ -597,9 +602,15 @@ fn gui_command_loop(engine: &SyncEngine, root: &std::path::Path) {
                 engine
                     .registry
                     .broadcast(&minisync::protocol::Message::Delete(path.clone()));
-                engine
-                    .history
-                    .record(&engine.peer_id, &engine.node_name, "deleted", &path);
+                if let Some(entry) =
+                    engine
+                        .history
+                        .record(&engine.peer_id, &engine.node_name, "deleted", &path)
+                {
+                    engine
+                        .registry
+                        .broadcast(&minisync::protocol::Message::HistoryAppend(entry));
+                }
                 engine.notify_gui(minisync::engine::EngineEvent::CatalogUpdated);
             }
             GuiCommand::UpdateConfig(new_config) => {

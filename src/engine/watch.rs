@@ -58,14 +58,16 @@ pub fn watch_loop(
                     entry.origin = Some(me);
                 }
 
-                // Log this local change (변경자 = self) for the history view.
+                // Log this local change (변경자 = self) and share it with peers.
                 if let Some(eng) = &engine {
                     let action = if seen.lock().unwrap().contains_key(&rel) {
                         "modified"
                     } else {
                         "added"
                     };
-                    eng.history.record(&peer_id, &node_name, action, &rel);
+                    if let Some(entry) = eng.history.record(&peer_id, &node_name, action, &rel) {
+                        registry.broadcast(&Message::HistoryAppend(entry));
+                    }
                 }
 
                 let lane = routing::lane_for(&rel);
@@ -169,7 +171,9 @@ pub fn watch_loop(
 
                 catalog.remove(&rel);
                 if let Some(eng) = &engine {
-                    eng.history.record(&peer_id, &node_name, "deleted", &rel);
+                    if let Some(entry) = eng.history.record(&peer_id, &node_name, "deleted", &rel) {
+                        registry.broadcast(&Message::HistoryAppend(entry));
+                    }
                     eng.notify_gui(EngineEvent::CatalogUpdated);
                 }
             }

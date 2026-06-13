@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
 use crate::catalog::NodeInfo;
+use crate::engine::history::HistoryEntry;
 use crate::index::FileEntry;
 
 /// Everything one peer can say to the other.
@@ -41,6 +42,10 @@ pub enum Message {
         node: NodeInfo,
         present: bool,
     },
+    /// A single change-history entry, broadcast by the node that made the change.
+    HistoryAppend(HistoryEntry),
+    /// A batch of recent history entries, sent on connect so a peer catches up.
+    HistorySync(Vec<HistoryEntry>),
 }
 
 /// Metadata for a reference-mode file (no contents transferred).

@@ -89,6 +89,14 @@ pub fn run_peer_session(
     let entries: Vec<FileEntry> = build_index(&root)?.into_values().collect();
     send_to_peer(&peer_conn, &Message::Index(entries))?;
 
+    // 5b) 최근 변경 이력 전송 — 오프라인이었던 피어가 공유 이력을 따라잡게.
+    if let Some(eng) = &engine {
+        let hist = eng.history.recent(200);
+        if !hist.is_empty() {
+            send_to_peer(&peer_conn, &Message::HistorySync(hist))?;
+        }
+    }
+
     // 6) 단일 스레드 논블로킹 full-duplex 펌프.
     //    reader/writer가 하나의 뮤텍스를 공유하던 구조를 없애 교착을 제거한다:
     //    매 루프마다 (보낼 것 보내고) + (받을 것 받으므로) 한 방향의 백프레셔가

@@ -71,9 +71,9 @@ pub fn handle_message(
                 println!("[sync] deleted {path}");
             }
             catalog.remove(path);
+            // History is authored & broadcast by the node that made the change
+            // (HistoryAppend), so we do NOT record received sync changes here.
             if let Some(eng) = engine {
-                eng.history
-                    .record(&remote_node.node_id, &remote_node.node_name, "deleted", path);
                 eng.notify_gui(EngineEvent::CatalogUpdated);
             }
         }
@@ -84,8 +84,6 @@ pub fn handle_message(
             let hash = seen.lock().unwrap().get(&path).cloned().unwrap_or_default();
             catalog.upsert_local(path.clone(), size, hash, SyncMode::FullCopy);
             if let Some(eng) = engine {
-                eng.history
-                    .record(&remote_node.node_id, &remote_node.node_name, "modified", &path);
                 eng.notify_gui(EngineEvent::CatalogUpdated);
             }
         }
@@ -95,8 +93,6 @@ pub fn handle_message(
             let hash = seen.lock().unwrap().get(&path).cloned().unwrap_or_default();
             catalog.upsert_local(path.clone(), size, hash, SyncMode::FullCopy);
             if let Some(eng) = engine {
-                eng.history
-                    .record(&remote_node.node_id, &remote_node.node_name, "modified", &path);
                 eng.notify_gui(EngineEvent::CatalogUpdated);
             }
         }
@@ -114,6 +110,24 @@ pub fn handle_message(
             }
             if let Some(eng) = engine {
                 eng.notify_gui(EngineEvent::CatalogUpdated);
+            }
+        }
+        Message::HistoryAppend(entry) => {
+            if let Some(eng) = engine {
+                if eng.history.apply_remote(entry) {
+                    eng.notify_gui(EngineEvent::CatalogUpdated);
+                }
+            }
+        }
+        Message::HistorySync(entries) => {
+            if let Some(eng) = engine {
+                let mut any = false;
+                for e in entries {
+                    any |= eng.history.apply_remote(e);
+                }
+                if any {
+                    eng.notify_gui(EngineEvent::CatalogUpdated);
+                }
             }
         }
     }
@@ -311,8 +325,6 @@ fn handle_file(
             let mode = config.read().unwrap().mode_for(&entry.path);
             catalog.upsert_local(entry.path, entry.size, entry.hash, mode);
             if let Some(eng) = engine {
-                eng.history
-                    .record(&remote_node.node_id, &remote_node.node_name, "added", &path);
                 eng.notify_gui(EngineEvent::CatalogUpdated);
             }
         }
@@ -357,12 +369,6 @@ fn handle_file(
                         mode,
                     );
                     if let Some(eng) = engine {
-                        eng.history.record(
-                            &remote_node.node_id,
-                            &remote_node.node_name,
-                            "modified",
-                            &path,
-                        );
                         eng.notify_gui(EngineEvent::CatalogUpdated);
                     }
                 }
