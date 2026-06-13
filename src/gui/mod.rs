@@ -23,6 +23,11 @@ pub struct GuiApp {
     /// Relative path of the folder currently shown in the file browser
     /// (empty string = sync root).
     current_dir: String,
+    /// Conflict notifications (newest last): "path ← from". Concurrent edits keep
+    /// the remote copy as `path.conflict-<peer>`; this surfaces it to the user.
+    conflicts: Vec<String>,
+    /// Whether the conflict list window is open.
+    show_conflicts: bool,
 }
 
 impl GuiApp {
@@ -34,6 +39,8 @@ impl GuiApp {
             status_message: String::new(),
             hovering_files: false,
             current_dir: String::new(),
+            conflicts: Vec::new(),
+            show_conflicts: false,
         }
     }
 
@@ -47,6 +54,10 @@ impl GuiApp {
                 }
                 EngineEvent::PeerDisconnected { remote_id } => {
                     self.status_message = format!("Peer {remote_id} disconnected");
+                }
+                EngineEvent::Conflict { path, from } => {
+                    self.status_message = format!("⚠ Conflict: {path} (from {from})");
+                    self.conflicts.push(format!("{path}  ←  {from}"));
                 }
                 EngineEvent::Error(msg) => {
                     self.status_message = format!("Error: {msg}");
@@ -231,6 +242,43 @@ impl eframe::App for GuiApp {
                 }
             });
         });
+
+        // Conflict warning banner (only when there are unresolved conflicts).
+        if !self.conflicts.is_empty() {
+            egui::TopBottomPanel::top("conflict_banner")
+                .frame(egui::Frame::none().fill(egui::Color32::from_rgb(120, 40, 40)).inner_margin(6.0))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            egui::Color32::WHITE,
+                            format!("⚠ {} conflict(s) detected", self.conflicts.len()),
+                        );
+                        if ui.button("View").clicked() {
+                            self.show_conflicts = true;
+                        }
+                        if ui.button("Dismiss").clicked() {
+                            self.conflicts.clear();
+                            self.show_conflicts = false;
+                        }
+                    });
+                });
+        }
+
+        // Conflict list window.
+        if self.show_conflicts {
+            egui::Window::new("Conflicts")
+                .open(&mut self.show_conflicts)
+                .show(ctx, |ui| {
+                    ui.label("Concurrent edits — the remote copy was kept alongside as");
+                    ui.monospace("<file>.conflict-<peer>");
+                    ui.separator();
+                    egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                        for c in &self.conflicts {
+                            ui.label(c);
+                        }
+                    });
+                });
+        }
 
         // Bottom status bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {

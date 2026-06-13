@@ -40,6 +40,9 @@ pub enum EngineEvent {
     PeerConnected { remote_id: String },
     /// A peer disconnected.
     PeerDisconnected { remote_id: String },
+    /// A concurrent-edit conflict was detected; the remote copy was saved
+    /// alongside as `path.conflict-<peer>`. `from` is the remote node name.
+    Conflict { path: String, from: String },
     /// An error occurred.
     Error(String),
 }

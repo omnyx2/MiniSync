@@ -104,7 +104,7 @@ pub fn file_browser_panel(
         return;
     }
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    egui::ScrollArea::both().show(ui, |ui| {
         egui::Grid::new("file_grid")
             .striped(true)
             .min_col_width(60.0)
@@ -114,7 +114,7 @@ pub fn file_browser_panel(
                 ui.strong("Size");
                 ui.strong("Mode");
                 ui.strong("Location");
-                ui.strong("Action");
+                ui.strong("State");
                 ui.end_row();
 
                 // Folders first, clickable to descend.
@@ -145,11 +145,11 @@ pub fn file_browser_panel(
                     ui.label(mode_label(entry.sync_mode));
                     ui.label(location_label(&entry.location, self_node_name));
 
-                    // Action: selective-sync toggle.
-                    //  - CRDT (text/code) files always sync → no toggle.
-                    //  - File-lane references: Download (if not here) / Remove (if here).
+                    // State: presence indicator + selective-sync action, merged.
+                    //  - CRDT (text/code) files always sync locally → ✓ auto.
+                    //  - File-lane: here → ✓ + Remove; not here → Download.
                     if crate::routing::lane_for(&entry.path) == crate::routing::Lane::Crdt {
-                        ui.weak("auto-sync");
+                        ui.colored_label(egui::Color32::from_rgb(60, 160, 60), "✓ auto");
                     } else {
                         match &entry.location {
                             FileLocation::Remote { .. } => {
@@ -162,18 +162,21 @@ pub fn file_browser_panel(
                                         .send(GuiCommand::Download(entry.path.clone()));
                                 }
                             }
-                            // Local or Both — we hold a copy; offer to drop it.
+                            // Local or Both — we hold a copy: show ✓ and offer to drop it.
                             _ => {
-                                if ui
-                                    .button("🗑 Remove")
-                                    .on_hover_text(
-                                        "Remove from THIS device only (kept on peers, re-downloadable)",
-                                    )
-                                    .clicked()
-                                {
-                                    let _ = commands_tx
-                                        .send(GuiCommand::RemoveLocal(entry.path.clone()));
-                                }
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(egui::Color32::from_rgb(60, 160, 60), "✓");
+                                    if ui
+                                        .button("🗑 Remove")
+                                        .on_hover_text(
+                                            "Remove from THIS device only (kept on peers, re-downloadable)",
+                                        )
+                                        .clicked()
+                                    {
+                                        let _ = commands_tx
+                                            .send(GuiCommand::RemoveLocal(entry.path.clone()));
+                                    }
+                                });
                             }
                         }
                     }

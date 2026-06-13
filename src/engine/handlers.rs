@@ -336,6 +336,12 @@ fn handle_file(
                         "[sync] CONFLICT {} — remote saved as {}",
                         entry.path, conf_rel
                     );
+                    if let Some(eng) = engine {
+                        eng.notify_gui(EngineEvent::Conflict {
+                            path: entry.path.clone(),
+                            from: remote_node.node_name.clone(),
+                        });
+                    }
                 }
             }
         }
