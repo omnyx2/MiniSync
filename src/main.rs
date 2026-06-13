@@ -210,6 +210,10 @@ fn main() -> Result<()> {
     // Create catalog
     let catalog = Catalog::new();
     minisync::catalog::store::load_catalog(&root, &catalog);
+    // Detect files edited while we were off (vs the loaded catalog's last-known
+    // hashes) and bump their version vectors — MUST run before the scan loop
+    // refreshes those hashes and before we connect/exchange indexes.
+    minisync::engine::scan::reconcile_offline_edits(&root, &catalog, &peer_id);
 
     // The engine exists on EVERY node (not just GUI) so headless nodes also
     // record & share change history and announce holdership. GUI channels are

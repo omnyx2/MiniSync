@@ -126,6 +126,11 @@ impl Catalog {
         self.entries.write().unwrap().remove(path);
     }
 
+    /// Last-known content hash of a path (for offline-edit detection on startup).
+    pub fn hash_of(&self, path: &str) -> Option<String> {
+        self.entries.read().unwrap().get(path).map(|e| e.hash.clone())
+    }
+
     /// True if this path is already tracked as local (or both) with the given size.
     /// Used by the folder scanner to skip re-hashing unchanged files.
     pub fn is_local_with_size(&self, path: &str, size: u64) -> bool {

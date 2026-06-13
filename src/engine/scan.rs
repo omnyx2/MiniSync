@@ -15,8 +15,48 @@ use std::time::Duration;
 use super::{EngineEvent, SyncEngine};
 use crate::catalog::{store, Catalog};
 use crate::config::SyncConfig;
-use crate::index::entry_for;
-use crate::routing;
+use crate::index::{entry_for, load_version, save_version};
+use crate::routing::{self, Lane};
+
+/// One-shot at startup (BEFORE the scan loop / before connecting): detect files
+/// edited while we were OFF — disk hash differs from the last-known catalog hash —
+/// and bump our version-vector counter so the change is causally tracked. Without
+/// this, two nodes that both edited the same binary offline have equal version
+/// vectors, so it resolves by mtime and one copy is silently overwritten. With it,
+/// the edits are concurrent → a `.conflict-<peer>` copy is kept instead.
+///
+/// CRDT/text files are skipped: their shadow-diff already captures offline edits
+/// and merges them losslessly.
+pub fn reconcile_offline_edits(root: &std::path::Path, catalog: &Catalog, peer_id: &str) {
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(root) {
+            Ok(p) => crate::index::normalize_rel(&p.to_string_lossy()),
+            Err(_) => continue,
+        };
+        if routing::is_minisync_internal(&rel) || routing::lane_for(&rel) != Lane::File {
+            continue;
+        }
+        let Some(known) = catalog.hash_of(&rel) else {
+            continue; // not previously tracked → a new file, handled normally
+        };
+        let cur = match entry_for(root, &rel) {
+            Ok(fe) => fe.hash,
+            Err(_) => continue,
+        };
+        if known != cur {
+            let mut vv = load_version(root, &rel);
+            *vv.entry(peer_id.to_string()).or_insert(0) += 1;
+            save_version(root, &rel, &vv);
+            println!("[startup] offline edit detected for {rel} — version bumped");
+        }
+    }
+}
 
 /// 스캔 주기. 너무 짧으면 디스크 부담, 너무 길면 갱신이 느리다.
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
