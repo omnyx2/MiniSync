@@ -55,6 +55,9 @@ pub enum GuiCommand {
     /// Remove the local copy of a file from THIS device only (selective sync).
     /// Peers and the original are untouched — it stays as a downloadable reference.
     RemoveLocal(String),
+    /// Delete a file from the ENTIRE network (destructive). Broadcasts a Delete so
+    /// every peer drops it. Any node may issue this (GUI confirms first).
+    DeleteEverywhere(String),
     /// Update the sync configuration.
     UpdateConfig(SyncConfig),
     /// Rescan the sync folder.
