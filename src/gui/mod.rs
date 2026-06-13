@@ -8,9 +8,10 @@ pub mod state;
 use eframe::egui;
 use std::path::Path;
 
+use self::file_browser::PendingConfirm;
 use self::settings_panel::SettingsState;
 use self::state::GuiBridge;
-use crate::engine::EngineEvent;
+use crate::engine::{EngineEvent, GuiCommand};
 
 /// Main GUI application.
 pub struct GuiApp {
@@ -28,6 +29,8 @@ pub struct GuiApp {
     conflicts: Vec<String>,
     /// Whether the conflict list window is open.
     show_conflicts: bool,
+    /// A destructive delete awaiting confirmation (set by the file browser).
+    pending_confirm: Option<PendingConfirm>,
 }
 
 impl GuiApp {
@@ -41,6 +44,7 @@ impl GuiApp {
             current_dir: String::new(),
             conflicts: Vec::new(),
             show_conflicts: false,
+            pending_confirm: None,
         }
     }
 
@@ -338,8 +342,51 @@ impl eframe::App for GuiApp {
                 &self.bridge.commands_tx,
                 &self.bridge.node_name,
                 &mut self.current_dir,
+                &mut self.pending_confirm,
             );
         });
+
+        // Destructive-delete confirmation modal.
+        if let Some(pc) = &self.pending_confirm {
+            let path = pc.path.clone();
+            let last_copy = pc.last_copy;
+            let mut decision: Option<bool> = None; // Some(true)=delete, Some(false)=cancel
+            egui::Window::new("⚠ Confirm delete")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    let red = egui::Color32::from_rgb(200, 80, 80);
+                    if last_copy {
+                        ui.colored_label(red, "This is the LAST copy.");
+                        ui.label(format!(
+                            "Removing \"{path}\" deletes it from the ENTIRE network. This cannot be undone."
+                        ));
+                    } else {
+                        ui.colored_label(red, "Delete from ALL devices");
+                        ui.label(format!(
+                            "\"{path}\" will be deleted everywhere. This cannot be undone."
+                        ));
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            decision = Some(false);
+                        }
+                        if ui.button("Delete everywhere").clicked() {
+                            decision = Some(true);
+                        }
+                    });
+                });
+            match decision {
+                Some(true) => {
+                    let _ = self.bridge.commands_tx.send(GuiCommand::DeleteEverywhere(path));
+                    self.pending_confirm = None;
+                }
+                Some(false) => self.pending_confirm = None,
+                None => {}
+            }
+        }
 
         // Drop overlay
         if self.hovering_files {
@@ -372,6 +419,51 @@ impl eframe::App for GuiApp {
     }
 }
 
+/// Load a system CJK font so Korean/CJK filenames render instead of showing as
+/// tofu boxes (egui's bundled fonts are Latin-only). Tries known per-OS paths and
+/// installs the first one found as a fallback for both font families.
+fn install_cjk_font(ctx: &egui::Context) {
+    #[cfg(target_os = "macos")]
+    let candidates: &[&str] = &[
+        "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+    ];
+    #[cfg(target_os = "windows")]
+    let candidates: &[&str] = &[
+        "C:\\Windows\\Fonts\\malgun.ttf",
+        "C:\\Windows\\Fonts\\gulim.ttc",
+        "C:\\Windows\\Fonts\\msgothic.ttc",
+    ];
+    #[cfg(target_os = "linux")]
+    let candidates: &[&str] = &[
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    ];
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    let candidates: &[&str] = &[];
+
+    let Some(bytes) = candidates
+        .iter()
+        .find_map(|p| std::fs::read(p).ok())
+    else {
+        eprintln!("[gui] no system CJK font found; non-Latin names may not render");
+        return;
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .font_data
+        .insert("cjk".to_owned(), egui::FontData::from_owned(bytes));
+    // Append as the lowest-priority fallback for both families so Latin glyphs
+    // keep egui's default look and CJK fills the gaps.
+    for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts.families.entry(fam).or_default().push("cjk".to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
 /// Run the GUI. This blocks until the window is closed.
 pub fn run_gui(bridge: GuiBridge) -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -385,6 +477,8 @@ pub fn run_gui(bridge: GuiBridge) -> eframe::Result {
         "minisync",
         options,
         Box::new(|cc| {
+            // Load a CJK font so non-Latin filenames render.
+            install_cjk_font(&cc.egui_ctx);
             // Install a repaint hook so engine events (local edits, files
             // arriving from peers, peer connect/disconnect) wake the window
             // instantly instead of waiting for the idle repaint timer.

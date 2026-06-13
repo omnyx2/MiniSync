@@ -520,16 +520,31 @@ fn gui_command_loop(engine: &SyncEngine, root: &std::path::Path) {
         match cmd {
             GuiCommand::Download(path) => {
                 println!("[gui] download requested: {path}");
+                // Try the catalog's known owners first; if none are recorded or
+                // reachable, fall back to asking ALL peers — only the ones that
+                // actually hold the file respond (handle_download_request is a
+                // no-op otherwise). This keeps Download working even when owner
+                // tracking is incomplete (e.g. a file synced after the last Index).
                 let owners = engine.catalog.owners_of(&path);
-                if let Some(owner) = owners.first() {
-                    if let Err(e) = engine.registry.send_to_remote(
-                        owner,
-                        &minisync::protocol::Message::DownloadRequest(path.clone()),
-                    ) {
-                        eprintln!("[gui] download request failed: {e}");
+                let mut sent = false;
+                for owner in &owners {
+                    if engine
+                        .registry
+                        .send_to_remote(
+                            owner,
+                            &minisync::protocol::Message::DownloadRequest(path.clone()),
+                        )
+                        .is_ok()
+                    {
+                        sent = true;
+                        break;
                     }
-                } else {
-                    eprintln!("[gui] no owner found for {path}");
+                }
+                if !sent {
+                    println!("[gui] no recorded owner for {path}; asking all peers");
+                    engine
+                        .registry
+                        .broadcast(&minisync::protocol::Message::DownloadRequest(path.clone()));
                 }
             }
             GuiCommand::RemoveLocal(path) => {
@@ -550,6 +565,26 @@ fn gui_command_loop(engine: &SyncEngine, root: &std::path::Path) {
                         eprintln!("[gui] remove-local failed for {path}: {e}");
                     }
                 }
+            }
+            GuiCommand::DeleteEverywhere(path) => {
+                // Destructive network-wide delete. Unlike RemoveLocal we WANT this to
+                // propagate, so we do NOT mark `evicting`. Pre-seed `seen` with the
+                // deleted marker so the watcher won't echo our own removal, then
+                // broadcast Delete explicitly (covers the reference-only deleter who
+                // has no local file for the watcher to notice).
+                println!("[gui] delete-everywhere requested: {path}");
+                engine
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .insert(path.clone(), minisync::engine::DELETED_HASH.to_string());
+                let abs = root.join(&path);
+                let _ = std::fs::remove_file(&abs); // may not exist (reference-only)
+                engine.catalog.remove(&path);
+                engine
+                    .registry
+                    .broadcast(&minisync::protocol::Message::Delete(path.clone()));
+                engine.notify_gui(minisync::engine::EngineEvent::CatalogUpdated);
             }
             GuiCommand::UpdateConfig(new_config) => {
                 println!("[gui] config updated");

@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
 
 use crate::catalog::{CatalogEntry, FileLocation};
-use crate::config::SyncMode;
 use crate::engine::GuiCommand;
 
 /// Aggregated info about a sub-folder directly under the current directory.
@@ -18,6 +17,32 @@ struct FolderRow {
     name: String,
     file_count: usize,
     total_size: u64,
+}
+
+/// A destructive action awaiting user confirmation in a modal. The panel only
+/// records the intent; `GuiApp` renders the confirm dialog and issues the command.
+pub struct PendingConfirm {
+    pub path: String,
+    /// True when this is a "remove my only copy" → effectively a network delete,
+    /// so the dialog warns it's the last copy.
+    pub last_copy: bool,
+}
+
+/// Overflow "⋯" menu carrying the always-available destructive action.
+fn more_menu(ui: &mut egui::Ui, pending: &mut Option<PendingConfirm>, path: &str) {
+    ui.menu_button("⋯", |ui| {
+        if ui
+            .button("🗑 Delete everywhere")
+            .on_hover_text("Delete from ALL devices (cannot be undone)")
+            .clicked()
+        {
+            *pending = Some(PendingConfirm {
+                path: path.to_string(),
+                last_copy: false,
+            });
+            ui.close_menu();
+        }
+    });
 }
 
 /// Render the file browser panel.
@@ -30,6 +55,7 @@ pub fn file_browser_panel(
     commands_tx: &Sender<GuiCommand>,
     self_node_name: &str,
     current_dir: &mut String,
+    pending: &mut Option<PendingConfirm>,
 ) {
     ui.heading("File Browser");
 
@@ -112,9 +138,9 @@ pub fn file_browser_panel(
                 // Header
                 ui.strong("Name");
                 ui.strong("Size");
-                ui.strong("Mode");
                 ui.strong("Location");
                 ui.strong("State");
+                ui.strong("Action");
                 ui.end_row();
 
                 // Folders first, clickable to descend.
@@ -131,8 +157,8 @@ pub fn file_browser_panel(
                         };
                     }
                     ui.label(format_size(folder.total_size));
-                    ui.label("");
                     ui.label(format!("{} item(s)", folder.file_count));
+                    ui.label("");
                     ui.label("");
                     ui.end_row();
                 }
@@ -142,44 +168,68 @@ pub fn file_browser_panel(
                     let name = file_name_of(&entry.path);
                     ui.label(format!("📄 {name}"));
                     ui.label(format_size(entry.size));
-                    ui.label(mode_label(entry.sync_mode));
                     ui.label(location_label(&entry.location, self_node_name));
 
-                    // State: presence indicator + selective-sync action, merged.
-                    //  - CRDT (text/code) files always sync locally → ✓ auto.
-                    //  - File-lane: here → ✓ + Remove; not here → Download.
-                    if crate::routing::lane_for(&entry.path) == crate::routing::Lane::Crdt {
-                        ui.colored_label(egui::Color32::from_rgb(60, 160, 60), "✓ auto");
+                    let is_crdt =
+                        crate::routing::lane_for(&entry.path) == crate::routing::Lane::Crdt;
+                    let i_hold = matches!(
+                        entry.location,
+                        FileLocation::Local | FileLocation::Both { .. }
+                    );
+                    // Other nodes that hold a copy (excludes us). If we hold and this
+                    // is 0, we're the last copy → Remove would destroy the file.
+                    let other_holders = match &entry.location {
+                        FileLocation::Remote { owners } | FileLocation::Both { owners } => {
+                            owners.len()
+                        }
+                        FileLocation::Local => 0,
+                    };
+                    let green = egui::Color32::from_rgb(60, 160, 60);
+
+                    // State column: pure presence indicator.
+                    if i_hold {
+                        ui.colored_label(green, "✓");
                     } else {
-                        match &entry.location {
-                            FileLocation::Remote { .. } => {
-                                if ui
-                                    .button("⬇ Download")
-                                    .on_hover_text("Download a copy onto this device")
-                                    .clicked()
-                                {
+                        ui.weak("ref");
+                    }
+
+                    // Action column: contextual primary button + ⋯ (Delete everywhere).
+                    ui.horizontal(|ui| {
+                        if is_crdt {
+                            // CRDT files always sync; no per-device opt-out.
+                            ui.colored_label(green, "auto");
+                            more_menu(ui, pending, &entry.path);
+                        } else if !i_hold {
+                            if ui
+                                .button("⬇ Download")
+                                .on_hover_text("Download a copy onto this device")
+                                .clicked()
+                            {
+                                let _ =
+                                    commands_tx.send(GuiCommand::Download(entry.path.clone()));
+                            }
+                            more_menu(ui, pending, &entry.path);
+                        } else {
+                            let last_copy = other_holders == 0;
+                            let hover = if last_copy {
+                                "This is the LAST copy — removing deletes it everywhere"
+                            } else {
+                                "Remove from THIS device only (kept on peers, re-downloadable)"
+                            };
+                            if ui.button("🗑 Remove").on_hover_text(hover).clicked() {
+                                if last_copy {
+                                    *pending = Some(PendingConfirm {
+                                        path: entry.path.clone(),
+                                        last_copy: true,
+                                    });
+                                } else {
                                     let _ = commands_tx
-                                        .send(GuiCommand::Download(entry.path.clone()));
+                                        .send(GuiCommand::RemoveLocal(entry.path.clone()));
                                 }
                             }
-                            // Local or Both — we hold a copy: show ✓ and offer to drop it.
-                            _ => {
-                                ui.horizontal(|ui| {
-                                    ui.colored_label(egui::Color32::from_rgb(60, 160, 60), "✓");
-                                    if ui
-                                        .button("🗑 Remove")
-                                        .on_hover_text(
-                                            "Remove from THIS device only (kept on peers, re-downloadable)",
-                                        )
-                                        .clicked()
-                                    {
-                                        let _ = commands_tx
-                                            .send(GuiCommand::RemoveLocal(entry.path.clone()));
-                                    }
-                                });
-                            }
+                            more_menu(ui, pending, &entry.path);
                         }
-                    }
+                    });
                     ui.end_row();
                 }
             });
@@ -200,13 +250,6 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
-}
-
-fn mode_label(mode: SyncMode) -> &'static str {
-    match mode {
-        SyncMode::FullCopy => "full",
-        SyncMode::Reference => "ref",
     }
 }
 
