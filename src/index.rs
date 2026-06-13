@@ -9,9 +9,19 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
 use crate::routing;
+
+/// Canonicalize a relative path string for the wire/catalog: forward slashes +
+/// Unicode NFC. macOS stores filenames as NFD (decomposed); Windows/Linux expect
+/// NFC. Without this, a Korean filename round-trips as garbled jamo and — worse —
+/// is treated as a *different* path on NFC filesystems, breaking dedup/merge.
+/// Every node normalizes the same way, so paths are byte-identical fleet-wide.
+pub fn normalize_rel(s: &str) -> String {
+    s.replace('\\', "/").nfc().collect()
+}
 
 /// One file's metadata, relative to the sync root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +41,29 @@ pub struct FileEntry {
 /// Map of relative-path -> entry. The whole-folder snapshot.
 pub type Index = HashMap<String, FileEntry>;
 
+#[cfg(test)]
+mod normalize_tests {
+    use super::normalize_rel;
+
+    #[test]
+    fn backslashes_become_forward_slashes() {
+        assert_eq!(normalize_rel("a\\b\\c.txt"), "a/b/c.txt");
+    }
+
+    #[test]
+    fn nfd_korean_normalizes_to_nfc() {
+        use unicode_normalization::UnicodeNormalization;
+        // macOS stores filenames decomposed (NFD); Windows/Linux use composed (NFC).
+        // A decomposed Korean path must normalize back to the same NFC bytes so the
+        // two filesystems agree on file identity.
+        let nfc = "무제 폴더/파일.txt";
+        let nfd: String = nfc.nfd().collect();
+        assert_ne!(nfd, nfc, "precondition: NFD != NFC byte-wise");
+        assert_eq!(normalize_rel(&nfd), nfc);
+        assert_eq!(normalize_rel(nfc), nfc, "already-NFC is unchanged");
+    }
+}
+
 /// Walk `root` recursively and build an index of every regular file.
 pub fn build_index(root: &Path) -> Result<Index> {
     let mut index = Index::new();
@@ -39,7 +72,7 @@ pub fn build_index(root: &Path) -> Result<Index> {
             continue;
         }
         let rel = match entry.path().strip_prefix(root) {
-            Ok(p) => p.to_string_lossy().replace('\\', "/"),
+            Ok(p) => normalize_rel(&p.to_string_lossy()),
             Err(_) => continue,
         };
         if routing::is_minisync_internal(&rel) {

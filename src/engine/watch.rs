@@ -32,7 +32,7 @@ pub fn watch_loop(
         match event {
             WatchEvent::Changed(changed) => {
                 let rel = match changed.strip_prefix(&*root) {
-                    Ok(p) => p.to_string_lossy().replace('\\', "/"),
+                    Ok(p) => crate::index::normalize_rel(&p.to_string_lossy()),
                     Err(_) => continue,
                 };
                 if rel.is_empty() || routing::is_minisync_internal(&rel) {
@@ -111,7 +111,7 @@ pub fn watch_loop(
             }
             WatchEvent::Removed(removed) => {
                 let rel = match removed.strip_prefix(&*root) {
-                    Ok(p) => p.to_string_lossy().replace('\\', "/"),
+                    Ok(p) => crate::index::normalize_rel(&p.to_string_lossy()),
                     Err(_) => continue,
                 };
                 if rel.is_empty() || routing::is_minisync_internal(&rel) {
