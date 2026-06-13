@@ -28,22 +28,6 @@ pub struct PendingConfirm {
     pub last_copy: bool,
 }
 
-/// Overflow "⋯" menu carrying the always-available destructive action.
-fn more_menu(ui: &mut egui::Ui, pending: &mut Option<PendingConfirm>, path: &str) {
-    ui.menu_button("⋯", |ui| {
-        if ui
-            .button("🗑 Delete everywhere")
-            .on_hover_text("Delete from ALL devices (cannot be undone)")
-            .clicked()
-        {
-            *pending = Some(PendingConfirm {
-                path: path.to_string(),
-                last_copy: false,
-            });
-            ui.close_menu();
-        }
-    });
-}
 
 /// Render the file browser panel.
 ///
@@ -142,6 +126,7 @@ pub fn file_browser_panel(
                 ui.strong("Location");
                 ui.strong("State");
                 ui.strong("Action");
+                ui.strong("Delete");
                 ui.end_row();
 
                 // Folders first, clickable to descend.
@@ -159,6 +144,7 @@ pub fn file_browser_panel(
                     }
                     ui.label(format_size(folder.total_size));
                     ui.label(format!("{} item(s)", folder.file_count));
+                    ui.label("");
                     ui.label("");
                     ui.label("");
                     ui.end_row();
@@ -194,43 +180,51 @@ pub fn file_browser_panel(
                         ui.weak("ref");
                     }
 
-                    // Action column: contextual primary button + ⋯ (Delete everywhere).
-                    ui.horizontal(|ui| {
-                        if is_crdt {
-                            // CRDT files always sync; no per-device opt-out.
-                            ui.colored_label(green, "auto");
-                            more_menu(ui, pending, &entry.path);
-                        } else if !i_hold {
-                            if ui
-                                .button("⬇ Download")
-                                .on_hover_text("Download a copy onto this device")
-                                .clicked()
-                            {
-                                let _ =
-                                    commands_tx.send(GuiCommand::Download(entry.path.clone()));
-                            }
-                            more_menu(ui, pending, &entry.path);
-                        } else {
-                            let last_copy = other_holders == 0;
-                            let hover = if last_copy {
-                                "This is the LAST copy — removing deletes it everywhere"
-                            } else {
-                                "Remove from THIS device only (kept on peers, re-downloadable)"
-                            };
-                            if ui.button("🗑 Remove").on_hover_text(hover).clicked() {
-                                if last_copy {
-                                    *pending = Some(PendingConfirm {
-                                        path: entry.path.clone(),
-                                        last_copy: true,
-                                    });
-                                } else {
-                                    let _ = commands_tx
-                                        .send(GuiCommand::RemoveLocal(entry.path.clone()));
-                                }
-                            }
-                            more_menu(ui, pending, &entry.path);
+                    // Action column: this-device sync control (get / drop a copy).
+                    if is_crdt {
+                        // CRDT files always sync; no per-device opt-out.
+                        ui.colored_label(green, "auto");
+                    } else if !i_hold {
+                        if ui
+                            .button("⬇ Download")
+                            .on_hover_text("Download a copy onto this device")
+                            .clicked()
+                        {
+                            let _ = commands_tx.send(GuiCommand::Download(entry.path.clone()));
                         }
-                    });
+                    } else {
+                        let last_copy = other_holders == 0;
+                        let hover = if last_copy {
+                            "This is the LAST copy — removing deletes it everywhere"
+                        } else {
+                            "Remove from THIS device only (kept on peers, re-downloadable)"
+                        };
+                        if ui.button("🗑 Remove").on_hover_text(hover).clicked() {
+                            if last_copy {
+                                *pending = Some(PendingConfirm {
+                                    path: entry.path.clone(),
+                                    last_copy: true,
+                                });
+                            } else {
+                                let _ = commands_tx
+                                    .send(GuiCommand::RemoveLocal(entry.path.clone()));
+                            }
+                        }
+                    }
+
+                    // Delete column: network-wide delete (distinct from Remove).
+                    let del = egui::Button::new("🗑")
+                        .fill(egui::Color32::from_rgb(90, 30, 30));
+                    if ui
+                        .add(del)
+                        .on_hover_text("Delete everywhere — remove from ALL devices (cannot be undone)")
+                        .clicked()
+                    {
+                        *pending = Some(PendingConfirm {
+                            path: entry.path.clone(),
+                            last_copy: false,
+                        });
+                    }
                     ui.end_row();
                 }
             });
