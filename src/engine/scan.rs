@@ -71,6 +71,20 @@ fn scan_once(
         }
         present.insert(rel.clone());
 
+        // Origin reconciliation — runs even when the content-change check below
+        // skips re-hashing, so a file cataloged before its origin was known still
+        // gets it. Adopt the recorded origin, or stamp ourselves for a held file
+        // that has none (we introduced it to the mesh).
+        match crate::index::load_origin(root, &rel) {
+            Some(o) => catalog.set_origin(&rel, o),
+            None => {
+                if let Some(me) = self_node {
+                    crate::index::save_origin(root, &rel, me);
+                    catalog.set_origin(&rel, me.clone());
+                }
+            }
+        }
+
         // CRDT(텍스트) 파일은 내용이 같은 지금(편집 전) 문서를 선제 생성해 둔다.
         // 두 피어가 동일 내용에서 결정적 genesis로 만들면 같은 계보가 되어,
         // 이후 첫 동시 편집도 데이터 유실 없이 병합된다.
@@ -87,16 +101,9 @@ fn scan_once(
         if let Ok(fe) = entry_for(root, &rel) {
             let mode = config.read().unwrap().mode_for(&rel);
             catalog.upsert_local(rel.clone(), fe.size, fe.hash, mode);
-            // Origin: adopt the recorded one, or stamp ourselves for a file we
-            // hold with no origin yet (we introduced it to the mesh).
-            match fe.origin {
-                Some(o) => catalog.set_origin(&rel, o),
-                None => {
-                    if let Some(me) = self_node {
-                        crate::index::save_origin(root, &rel, me);
-                        catalog.set_origin(&rel, me.clone());
-                    }
-                }
+            // Entry now exists — make the origin stick immediately.
+            if let Some(o) = crate::index::load_origin(root, &rel) {
+                catalog.set_origin(&rel, o);
             }
         }
     }
