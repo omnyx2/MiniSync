@@ -130,6 +130,7 @@ pub fn handle_message(
                 }
             }
         }
+        Message::Ping => {} // liveness only — receipt refreshes the peer's last-seen
     }
     Ok(())
 }

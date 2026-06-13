@@ -16,7 +16,8 @@ use crate::config::SyncConfig;
 use crate::index::{build_index, FileEntry};
 use crate::net::peers::{send_to_peer, PeerConn, PeerRegistry};
 use crate::net::{self, TlsStream};
-use crate::protocol::{recv_msg, send_msg, Message};
+use crate::protocol::{recv_msg, send_msg, serialize_msg, Message};
+use std::time::Instant;
 
 /// 한 피어의 전체 라이프사이클: TLS handshake → Hello → Index → reader loop.
 pub fn run_peer_session(
@@ -158,6 +159,16 @@ fn pump_loop(
     let mut inbuf = Vec::new();
     let mut tmp = [0u8; 16384];
 
+    // Liveness heartbeat: ping every PING_INTERVAL; if nothing is received for
+    // PEER_TIMEOUT the peer is presumed dead and we drop the connection (so peer
+    // lists / availability reflect reality promptly instead of lingering on a
+    // half-open TCP socket). Both sides ping, so an idle-but-alive link stays up.
+    const PING_INTERVAL: Duration = Duration::from_secs(4);
+    const PEER_TIMEOUT: Duration = Duration::from_secs(12);
+    let ping_bytes = serialize_msg(&Message::Ping)?;
+    let mut last_recv = Instant::now();
+    let mut last_ping = Instant::now();
+
     loop {
         // (0) 중복연결 해소로 축출되었으면 즉시 종료 (소켓 닫힘).
         if peer_conn.evicted.load(std::sync::atomic::Ordering::SeqCst) {
@@ -166,6 +177,18 @@ fn pump_loop(
         }
 
         let mut did_work = false;
+
+        // (0b) Heartbeat: drop a silent/dead peer; otherwise ping periodically.
+        let now = Instant::now();
+        if now.duration_since(last_recv) > PEER_TIMEOUT {
+            println!("[sync] peer {remote_id} timed out (no data for >{}s)", PEER_TIMEOUT.as_secs());
+            return Ok(());
+        }
+        if now.duration_since(last_ping) >= PING_INTERVAL {
+            tls.conn.writer().write_all(&ping_bytes)?;
+            last_ping = now;
+            did_work = true;
+        }
 
         // (a) 아웃바운드 메시지를 rustls 송신 버퍼에 적재 (소켓 I/O 없음)
         loop {
@@ -198,6 +221,7 @@ fn pump_loop(
             Ok(_) => {
                 tls.conn.process_new_packets()?;
                 did_work = true;
+                last_recv = Instant::now(); // peer is alive
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}

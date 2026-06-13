@@ -46,6 +46,8 @@ pub enum Message {
     HistoryAppend(HistoryEntry),
     /// A batch of recent history entries, sent on connect so a peer catches up.
     HistorySync(Vec<HistoryEntry>),
+    /// Liveness heartbeat. Receipt alone proves the peer is alive; no reply needed.
+    Ping,
 }
 
 /// Metadata for a reference-mode file (no contents transferred).
