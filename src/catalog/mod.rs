@@ -56,6 +56,9 @@ impl Catalog {
 
     /// Update or insert a local file entry.
     pub fn upsert_local(&self, path: String, size: u64, hash: String, sync_mode: SyncMode) {
+        // NFC-normalize the key so a file never lives under both NFD and NFC keys
+        // (macOS NFD vs Win/Linux NFC), which would split into duplicate entries.
+        let path = crate::index::normalize_rel(&path);
         let mut map = self.entries.write().unwrap();
         let entry = map.entry(path.clone()).or_insert_with(|| CatalogEntry {
             path: path.clone(),
@@ -89,6 +92,7 @@ impl Catalog {
         owner: NodeInfo,
         sync_mode: SyncMode,
     ) {
+        let path = crate::index::normalize_rel(&path);
         let mut map = self.entries.write().unwrap();
         let entry = map.entry(path.clone()).or_insert_with(|| CatalogEntry {
             path: path.clone(),
@@ -216,8 +220,9 @@ impl Catalog {
     /// changes to a *smaller* node_id, so independent concurrent creations on
     /// different nodes converge to the same origin fleet-wide.
     pub fn set_origin(&self, path: &str, origin: NodeInfo) {
+        let path = crate::index::normalize_rel(path);
         let mut map = self.entries.write().unwrap();
-        if let Some(entry) = map.get_mut(path) {
+        if let Some(entry) = map.get_mut(&path) {
             let replace = match &entry.origin {
                 None => true,
                 Some(cur) => origin.node_id < cur.node_id,
@@ -231,8 +236,9 @@ impl Catalog {
     /// Add a remote holder (a peer that now has a local copy) to an existing
     /// entry. No-op if the path is unknown. `Local` → `Both`.
     pub fn add_holder(&self, path: &str, holder: NodeInfo) {
+        let path = crate::index::normalize_rel(path);
         let mut map = self.entries.write().unwrap();
-        let Some(entry) = map.get_mut(path) else { return };
+        let Some(entry) = map.get_mut(&path) else { return };
         match &mut entry.location {
             FileLocation::Remote { owners } | FileLocation::Both { owners } => {
                 if let Some(existing) = owners.iter_mut().find(|o| o.node_id == holder.node_id) {
@@ -264,8 +270,9 @@ impl Catalog {
 
     /// Mark a file as now also local (after download).
     pub fn mark_local(&self, path: &str) {
+        let path = crate::index::normalize_rel(path);
         let mut map = self.entries.write().unwrap();
-        if let Some(entry) = map.get_mut(path) {
+        if let Some(entry) = map.get_mut(&path) {
             match &entry.location {
                 FileLocation::Remote { owners } => {
                     entry.location = FileLocation::Both {

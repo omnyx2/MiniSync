@@ -50,14 +50,22 @@ enum DlState {
     Unavailable,
 }
 
+struct SyncItem {
+    path: String,
+    state: DlState,
+    /// How many times we've requested it this run; capped to avoid churn on a
+    /// file that never completes (e.g. holder can't actually serve it).
+    attempts: u32,
+}
+
 /// Tracks a "Sync all" download of every file under a folder. Whole-file
 /// transfers are atomic, so this is file-granular: completed files are kept;
 /// files whose holders are offline are skipped (not blocking the rest); a holder
-/// dropping mid-download flips its file to Unavailable (no infinite wait);
-/// re-running resumes whatever is still missing.
+/// dropping mid-download flips its file to Unavailable (no infinite wait); a file
+/// that fails MAX_ATTEMPTS times is given up; re-running resumes what's missing.
 struct SyncAll {
     folder: String,
-    items: Vec<(String, DlState)>,
+    items: Vec<SyncItem>,
 }
 
 impl GuiApp {
@@ -85,12 +93,16 @@ impl GuiApp {
         } else {
             format!("{folder}/")
         };
-        let items: Vec<(String, DlState)> = entries
+        let items: Vec<SyncItem> = entries
             .iter()
             .filter(|e| prefix.is_empty() || e.path.starts_with(&prefix))
             .filter(|e| crate::routing::lane_for(&e.path) == crate::routing::Lane::File)
             .filter(|e| matches!(e.location, FileLocation::Remote { .. }))
-            .map(|e| (e.path.clone(), DlState::Pending))
+            .map(|e| SyncItem {
+                path: e.path.clone(),
+                state: DlState::Pending,
+                attempts: 0,
+            })
             .collect();
         if !items.is_empty() {
             self.syncing = Some(SyncAll { folder, items });
@@ -111,7 +123,8 @@ impl GuiApp {
     ) {
         use crate::catalog::FileLocation;
         const MAX_INFLIGHT: usize = 6;
-        const BACKSTOP: std::time::Duration = std::time::Duration::from_secs(60);
+        const MAX_ATTEMPTS: u32 = 3;
+        const BACKSTOP: std::time::Duration = std::time::Duration::from_secs(25);
         let tx = self.bridge.commands_tx.clone();
         let now = std::time::Instant::now();
         let finished = {
@@ -136,22 +149,22 @@ impl GuiApp {
             };
 
             // 1) Update each file's state from current reality.
-            for (path, st) in sa.items.iter_mut() {
-                if is_local(path) {
-                    *st = DlState::Done;
+            for it in sa.items.iter_mut() {
+                if is_local(&it.path) {
+                    it.state = DlState::Done;
                     continue;
                 }
-                match st {
-                    DlState::Done => *st = DlState::Pending, // dropped locally again → retry
+                match it.state {
+                    DlState::Done => it.state = DlState::Pending, // dropped locally → retry
                     DlState::Unavailable => {
-                        if holder_online(path) {
-                            *st = DlState::Pending; // a holder came back
+                        // Retry only if a holder is back AND we haven't given up.
+                        if holder_online(&it.path) && it.attempts < MAX_ATTEMPTS {
+                            it.state = DlState::Pending;
                         }
                     }
                     DlState::InFlight(deadline) => {
-                        if !holder_online(path) || now >= *deadline {
-                            // holder dropped mid-download, or stalled too long
-                            *st = DlState::Unavailable;
+                        if !holder_online(&it.path) || now >= deadline {
+                            it.state = DlState::Unavailable; // dropped/stalled → give back
                         }
                     }
                     DlState::Pending => {}
@@ -162,28 +175,33 @@ impl GuiApp {
             let mut inflight = sa
                 .items
                 .iter()
-                .filter(|(_, s)| matches!(s, DlState::InFlight(_)))
+                .filter(|it| matches!(it.state, DlState::InFlight(_)))
                 .count();
-            for (path, st) in sa.items.iter_mut() {
-                if !matches!(st, DlState::Pending) {
+            for it in sa.items.iter_mut() {
+                if !matches!(it.state, DlState::Pending) {
                     continue;
                 }
-                if !holder_online(path) {
-                    *st = DlState::Unavailable;
+                if !holder_online(&it.path) || it.attempts >= MAX_ATTEMPTS {
+                    it.state = DlState::Unavailable; // unreachable, or gave up
                 } else if inflight < MAX_INFLIGHT {
-                    let _ = tx.send(GuiCommand::Download(path.clone()));
-                    *st = DlState::InFlight(now + BACKSTOP);
+                    let _ = tx.send(GuiCommand::Download(it.path.clone()));
+                    it.state = DlState::InFlight(now + BACKSTOP);
+                    it.attempts += 1;
                     inflight += 1;
                 }
             }
 
             // 3) Stats + window.
             let total = sa.items.len();
-            let done = sa.items.iter().filter(|(_, s)| matches!(s, DlState::Done)).count();
+            let done = sa
+                .items
+                .iter()
+                .filter(|it| matches!(it.state, DlState::Done))
+                .count();
             let unavail = sa
                 .items
                 .iter()
-                .filter(|(_, s)| matches!(s, DlState::Unavailable))
+                .filter(|it| matches!(it.state, DlState::Unavailable))
                 .count();
             let active = total - done - unavail; // Pending or InFlight
             let complete = active == 0;
