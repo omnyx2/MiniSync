@@ -1,28 +1,35 @@
 # minisync
 
-P2P 폴더 동기화 도구. Full mesh 구조로 모든 노드가 직접 연결되며, TLS 암호화 통신.
-Rust 단일 바이너리로 별도 의존성 없이 실행 가능.
+같은 네트워크의 컴퓨터들이 **폴더를 평등하게(서버 없이) 공유·관리**하는 P2P 동기화 도구.
+모든 노드가 직접 연결되는 full‑mesh, TLS 암호화, CRDT 텍스트 병합. Rust 단일 바이너리.
+**macOS · Windows · Linux** 모두 GUI를 지원합니다.
 
-## 빌드 없이 바로 사용 (Pre-built Binaries)
+## 설계 컨셉 (3원칙)
 
-[**GitHub Releases**](https://github.com/omnyx2/MiniSync/releases)에서 플랫폼별 바이너리를 받으세요:
+1. **평등한 P2P** — 중앙 서버/마스터 없음. 모든 노드가 동등한 공동 소유자.
+2. **소유 명확성** — *누가 무엇을 가졌는지* 항상 알 수 있다 (원본 + 보유자).
+3. **이력 관리** — *누가 언제 무엇을 바꿨는지* 변경 이력이 노드 간 공유된다.
 
-| 파일 | 플랫폼 | 아키텍처 | 비고 |
-|---|---|---|---|
-| `minisync-macos` | macOS | Apple Silicon (arm64) | GUI 지원 (`--gui`) |
-| `minisync-linux-amd64` | Linux | x86_64 | 정적 링크 (musl) |
-| `minisync-linux-arm64` | Linux | aarch64 | 정적 링크 (musl) |
+---
 
-Linux 바이너리는 정적 링크되어 있어 **우분투 등 어떤 리눅스에서든 의존성 설치 없이 바로 실행**됩니다.
-받은 뒤 실행 권한을 부여하세요: `chmod +x minisync-*`
+## 다운로드 (Pre-built)
 
-> 직접 빌드하려면 아래 [소스에서 빌드](#소스에서-빌드)를 참고하세요 — 결과물은 `target/release/minisync`에 생성됩니다.
+[**GitHub Releases**](https://github.com/omnyx2/MiniSync/releases)에서 받으세요:
+
+| OS | 파일 | 설치 |
+|---|---|---|
+| macOS (Apple Silicon) | `minisync-macos-arm64.dmg` | `.dmg` 열고 **minisync.app** 꺼내서 실행 |
+| Windows (x64) | `minisync-windows-x64.zip` | 압축 풀고 `minisync-windows-x64.exe` 더블클릭 |
+| Linux (x64, glibc) | `minisync-linux-x64.tar.gz` | 풀고 `chmod +x minisync` 후 실행 |
+
+> **첫 실행 보안 경고 (아직 코드서명 안 됨):**
+> macOS — `minisync.app` 우클릭 → **열기** (또는 `xattr -dr com.apple.quarantine minisync.app`) ·
+> Windows — SmartScreen **추가 정보 → 실행** ·
+> Linux — 데스크톱 세션 + `libGL`/`libxkbcommon` 필요, 한글 파일명은 Noto/Nanum CJK 폰트 설치 시 표시.
 
 ---
 
 ## 실행 방법
-
-### 기본 문법
 
 ```
 minisync [--gui] <동기화폴더> <내_주소> [상대방_주소 ...]
@@ -30,194 +37,143 @@ minisync [--gui] <동기화폴더> <내_주소> [상대방_주소 ...]
 
 | 인자 | 설명 | 예시 |
 |---|---|---|
-| `<동기화폴더>` | 동기화할 폴더 경로 (없으면 자동 생성) | `~/Sync` |
-| `<내_주소>` | 내가 수신할 IP:포트 | `0.0.0.0:9000` |
-| `[상대방_주소]` | 연결할 상대 노드들 | `192.168.1.100:9001` |
-| `--gui` | 데스크톱 GUI 실행 (macOS만) | |
+| `<동기화폴더>` | 동기화할 폴더 (없으면 생성) | `~/Sync` |
+| `<내_주소>` | 수신 IP:포트 | `0.0.0.0:9000` |
+| `[상대방_주소]` | 연결할 노드들 (같은 LAN이면 생략 가능 — 자동 발견) | `192.168.1.100:9000` |
+| `--gui` | 데스크톱 GUI (**3 플랫폼 모두**) | |
 
-### macOS (GUI 모드)
-
-```bash
-./minisync-macos --gui ~/Sync 0.0.0.0:9000
-```
-
-### 우분투 / Linux
+- **GUI**: 앱을 더블클릭하거나 `--gui`로 실행. 인자 없이 실행하면 저장된 설정/기본 폴더로 GUI가 열립니다.
+- **헤드리스**: `--gui`를 빼면 창 없이 백그라운드 동기화 (서버 등).
+- 한 번 실행하면 설정이 저장되어, 다음부터는 인자 없이 실행 가능.
 
 ```bash
-# 1) 바이너리 복사
-scp minisync-linux-amd64 ubuntu-server:~/minisync
-
-# 2) 실행 권한 부여
-ssh ubuntu-server "chmod +x ~/minisync"
-
-# 3) 실행 (포트 9001에서 수신, macOS 노드에 연결)
-ssh ubuntu-server "~/minisync ~/Sync 0.0.0.0:9001 <macOS-IP>:9000"
+# 2대 예시 (Mac + Ubuntu)
+./minisync --gui ~/Sync 0.0.0.0:9000 192.168.1.100:9000   # Mac
+./minisync       ~/Sync 0.0.0.0:9000 192.168.1.50:9000    # Ubuntu (헤드리스)
 ```
 
-ARM64 서버 (라즈베리파이, AWS Graviton 등)는 `minisync-linux-arm64`를 사용하세요.
+---
 
-### 2대 연결 예시 (macOS + Ubuntu)
+## GUI 둘러보기
 
-```bash
-# macOS (192.168.1.50)
-./minisync-macos --gui ~/Sync 0.0.0.0:9000 192.168.1.100:9001
+파일 브라우저는 폴더 탐색형이며, 각 파일 행에 다음 열이 있습니다:
 
-# Ubuntu (192.168.1.100)
-./minisync ~/Sync 0.0.0.0:9001 192.168.1.50:9000
-```
+| 열 | 의미 |
+|---|---|
+| **Name** | 파일/폴더 (폴더 클릭 시 진입) |
+| **Size** | 크기 |
+| **Location** | **원본(origin) + 보유자 수** — 클릭하면 보유자 목록 드롭다운. 원본이 사본을 안 가지면 `(no copy)` |
+| **Available** | `✓ here`(내가 보유) / `● online`(보유자 온라인 → 받기 가능) / `unavailable`(보유자 전원 오프라인) |
+| **Sync** | 토글 — `auto-sync`(이 기기에 보관, 자동 갱신) ↔ `off`(참조만). 텍스트는 항상 `auto-sync`(잠김) |
+| **Delete** | 🗑 **전체 삭제** (모든 기기에서 삭제, 확인창) |
 
-양쪽 `~/Sync` 폴더에 파일을 넣으면 상대방에 자동으로 동기화됩니다.
+- **폴더 행**: `N/M`(하위 동기화 개수)와 우측 **⬇ Sync all** 버튼(하위 전체 다운로드 — 진행률 창 + 취소; 보유자 오프라인 파일은 자동 skip).
+- **History** 버튼: 누가 언제 무엇을 추가/수정/삭제했는지 이력.
+- **드래그&드롭**으로 파일 임포트, **동시 편집 충돌** 시 상단 경고 배너.
 
-### 3대 이상 (Full Mesh)
+---
 
-```bash
-# Node A (10.0.0.1:9000)
-./minisync ~/Sync 0.0.0.0:9000 10.0.0.2:9001 10.0.0.3:9002
+## 동기화 동작 ("무엇이 최신인가")
 
-# Node B (10.0.0.2:9001)
-./minisync ~/Sync 0.0.0.0:9001 10.0.0.1:9000 10.0.0.3:9002
+파일 종류에 따라 다르게 처리합니다:
 
-# Node C (10.0.0.3:9002)
-./minisync ~/Sync 0.0.0.0:9002 10.0.0.1:9000 10.0.0.2:9001
-```
+- **텍스트/코드** (`.md` `.txt` `.json` `.csv` 소스 등): **CRDT(Automerge) 병합** — "최신"이라는 개념 없이
+  변경이 **합쳐집니다**. 동시 편집·오프라인 편집도 손실 없이 병합.
+- **바이너리** (이미지/PDF/zip/문서 등): **버전 벡터(인과 이력)** — 한쪽이 더 최신이면 그것으로 교체,
+  **독립 동시 편집이면 충돌로 보고 `파일.conflict-<peer>` 사본을 둘 다 보존**(조용한 손실 없음),
+  비길 때만 수정 시각(mtime). 껐을 때 한 편집(오프라인)도 시작 시 감지해 인과를 추적합니다.
 
-### 저장된 설정으로 재실행
+---
 
-한번 실행하면 설정이 자동 저장됩니다. 다음부터는 인자 없이:
+## 선택적 동기화 (Selective Sync)
 
-```bash
-# macOS
-./minisync-macos --gui
+기본적으로 파일은 모든 노드에 자동 복사되지 않고 **참조(메타데이터)만 공유**됩니다.
+각 기기는 **Sync 토글로 고른 파일만** 실제로 보관합니다.
 
-# Linux
-./minisync
-```
+- **auto-sync 켬** = 이 기기에 사본 보관 + 자동 갱신
+- **off** = 참조만 (필요할 때 다시 켜서 받기)
+- **Remove(off)는 네트워크 삭제가 아닙니다** — 내 로컬 캐시만 비웁니다. 다른 노드 원본은 그대로.
+- 전체 네트워크에서 지우려면 **Delete** 열(확인 거침).
+- 텍스트/코드는 작고 병합 이점이 있어 **항상 동기화**(CRDT).
+
+폴더별 규칙은 `<폴더>/.minisync/config.toml`로 지정 (아래 [설정](#설정) 참고).
+
+---
+
+## 주요 기능
+
+- **평등 P2P full‑mesh** — 중앙 서버 없이 노드끼리 직접 연결
+- **TLS 암호화** — 자체서명 인증서로 전 통신 암호화
+- **CRDT 텍스트 병합** + **버전 벡터 충돌 감지**(conflict 사본)
+- **선택적 동기화** — 참조 공유 + 고른 파일만 보관
+- **원본/보유자 추적 + Available** — 누가 가졌는지, 지금 받을 수 있는지
+- **변경 이력 공유** — 누가/언제/무엇을 (모든 노드가 같은 이력으로 수렴)
+- **실시간 피어 추적** — heartbeat(4초 ping / 12초 timeout)로 죽은 피어 빠르게 감지
+- **Sync all** — 폴더 하위 전체 다운로드(진행률·취소·재개)
+- **오프라인 편집 감지** — 껐을 때 바뀐 파일도 시작 시 인과 추적
+- **LAN 자동 발견** (UDP) · **lattice VPN 오버레이**(`--lattice`)
+- **GUI** (macOS/Windows/Linux): 파일 목록·피어·이력·드래그&드롭
 
 ---
 
 ## 설정
 
 ### 전역 설정 (`~/.config/minisync/app.toml`)
-
-자동 저장되며, 직접 편집도 가능:
-
 ```toml
 sync_folder = "/home/user/Sync"
 listen_addr = "0.0.0.0:9000"
-peers = ["192.168.1.100:9001"]
-node_name = "my-ubuntu-server"
+peers = ["192.168.1.100:9000"]
+node_name = "my-laptop"      # GUI 표시 이름 (기본: 호스트명)
 ```
 
-- `node_name`: GUI에서 표시되는 노드 이름 (기본값: 호스트명). GUI Settings에서도 변경 가능.
-
-### 폴더별 동기화 규칙 (`<동기화폴더>/.minisync/config.toml`)
-
-파일 패턴별로 동기화 모드를 지정:
-
+### 폴더별 규칙 (`<동기화폴더>/.minisync/config.toml`)
 ```toml
-default_mode = "full_copy"
+default_mode = "reference"   # 또는 "full_copy"
 
 [[rules]]
 pattern = "*.pdf"
-mode = "reference"
-
-[[rules]]
-pattern = "*.mp4"
-mode = "reference"
+mode = "reference"           # 메타데이터만, 필요시 다운로드
 
 [[rules]]
 pattern = "src/**"
-mode = "full_copy"
+mode = "full_copy"           # 항상 전체 복사
 ```
 
-- **full_copy**: 파일 전체가 모든 노드에 복사됨
-- **reference**: 메타데이터만 공유, 필요할 때 수동 다운로드 (대용량 파일에 적합)
-
 ---
 
-## 선택적 동기화 (Selective Sync)
+## 네트워크
 
-기본적으로 파일은 **모든 노드에 자동 복사되지 않습니다**. 대신 메타데이터(참조)만
-공유되고, 각 기기는 **사용자가 고른 파일만** 실제로 내려받아 보관합니다.
+- 수신 포트(예: 9000)가 방화벽에서 열려 있어야 함.
+- 같은 LAN: 사설 IP로 바로 연결되며, **상대 주소 없이도 UDP 비콘(포트 19531)으로 자동 발견**.
+- 인터넷 너머: 포트포워딩 또는 Tailscale/WireGuard/lattice 등 VPN.
 
-GUI 파일 목록의 **Action** 버튼이 파일별 토글입니다:
-
-| 상태 | 버튼 | 동작 |
-|---|---|---|
-| 이 기기에 없음 | **⬇ Download** | 이 기기로 복사본을 내려받음 |
-| 이 기기에 있음 | **🗑 Remove** | **이 기기에서만** 제거 (피어/원본은 그대로, 다시 받을 수 있음) |
-
-- **Remove는 네트워크 삭제가 아닙니다** — 내 로컬 캐시만 비웁니다. 다른 노드의 원본은
-  건드리지 않으며, 참조로 남아 언제든 다시 Download할 수 있습니다.
-- 한 번 내려받은(선택한) 파일은 **계속 동기화**됩니다 — 원본이 바뀌면 자동 갱신.
-- 텍스트/코드(`.txt`, `.md`, `.json`, 소스 등)는 작고 병합 이점이 있어 **항상 동기화**됩니다
-  (CRDT). 미디어·문서·바이너리만 선택적으로 동작합니다.
-
-> 특정 패턴을 항상 전체 복사하려면 `<폴더>/.minisync/config.toml`에 규칙을 추가하세요
-> (아래 [설정](#폴더별-동기화-규칙-동기화폴더minisyncconfigtoml) 참고).
-
----
-
-## 주요 기능
-
-- **선택적 동기화**: 기본은 참조 공유, 고른 파일만 기기에 보관 (위 참고)
-- **P2P Full Mesh**: 중앙 서버 없이 노드끼리 직접 연결
-- **TLS 암호화**: 자체서명 인증서로 모든 통신 암호화
-- **실시간 동기화**: 파일 변경 즉시 감지 및 전파
-- **CRDT 텍스트 병합**: `.txt`, `.md`, `.json` 파일은 Automerge로 충돌 없이 병합
-- **버전 벡터**: 바이너리 파일 충돌 감지 및 conflict 파일 생성
-- **Reference 모드**: 대용량 파일은 메타데이터만 공유, 필요시 다운로드
-- **노드 이름**: 각 컴퓨터를 사람이 읽을 수 있는 이름으로 식별
-- **GUI** (macOS): 파일 목록, 피어 상태, 드래그&드롭 임포트, 설정 편집
+### lattice VPN 오버레이 (`--lattice`)
+[lattice](https://github.com/omnyx2) 메시 VPN 위에서 NAT 너머 동기화:
+```bash
+minisync --lattice ~/Sync 0.0.0.0:9000
+```
+- 모든 노드가 **같은 수신 포트**를 사용해야 함. lattice 데몬 실행 중 + 실행 파일 이름이 `minisync`여야 함.
+- `--lattice` 모드에선 LAN UDP 자동 발견이 꺼집니다.
 
 ---
 
 ## 소스에서 빌드
 
 ```bash
-# Rust 설치 (https://rustup.rs)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Rust 설치: https://rustup.rs
+cargo build --release                 # 헤드리스
+cargo build --release --features gui  # GUI 포함
 
-# 헤드리스 빌드
-cargo build --release
-
-# GUI 포함 빌드 (macOS)
-cargo build --release --features gui
-
-# Linux 크로스 컴파일 (macOS에서)
-# 사전 준비: cargo install cargo-zigbuild, zig 설치
-rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+# Linux 크로스 컴파일 (macOS에서, 헤드리스):
+#   cargo install cargo-zigbuild && rustup target add x86_64-unknown-linux-musl
 cargo zigbuild --release --target x86_64-unknown-linux-musl
-cargo zigbuild --release --target aarch64-unknown-linux-musl
 ```
+결과물: `target/release/minisync`. (GUI 리눅스 배포 바이너리는 해당 리눅스에서 빌드하세요.)
+
+### Docker로 노드 띄우기 (개발용)
+`Dockerfile` / `docker-compose.yml` / `docker-sync.sh` 참고 — 컨테이너로 노드를 실행하거나
+호스트↔컨테이너 폴더를 동기화하는 예시.
 
 ---
 
-## 네트워크 참고
-
-- 수신 포트(예: 9000)가 방화벽에서 열려 있어야 합니다
-- 같은 LAN이면 사설 IP로 바로 연결
-- 인터넷 너머라면 포트포워딩 또는 Tailscale/WireGuard 등 VPN 사용
-
-### LAN 자동 발견
-
-같은 LAN의 노드들은 상대방 주소를 적지 않아도 UDP 비콘으로 서로를 찾아 자동 연결됩니다
-(포트 19531). 상대방 주소 인자는 생략 가능:
-
-```bash
-minisync ~/Sync 0.0.0.0:9000      # 같은 LAN의 다른 노드를 자동 발견
-```
-
-### lattice VPN 오버레이 (`--lattice`)
-
-[lattice](https://github.com/omnyx2) 메시 VPN 위에서 동기화할 수 있습니다. 각 노드의
-lattice 데몬에 질의해 연결된 피어의 가상 IP로 자동 연결합니다 — NAT 너머에서도 동작:
-
-```bash
-minisync --lattice ~/Sync 0.0.0.0:9000
-```
-
-- 모든 노드가 **같은 수신 포트**를 써야 합니다(피어를 `<가상IP>:<그 포트>`로 연결).
-- lattice 데몬이 실행 중이어야 하며, minisync 실행 파일 이름이 정확히 `minisync`여야
-  데몬의 health-check 게이트를 통과합니다.
-- `--lattice` 모드에서는 LAN UDP 자동 발견이 비활성화됩니다(오버레이가 유일 경로).
+자세한 변경 내역은 [CHANGELOG.md](CHANGELOG.md) 참고.
