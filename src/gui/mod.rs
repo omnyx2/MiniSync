@@ -37,18 +37,27 @@ pub struct GuiApp {
     syncing: Option<SyncAll>,
 }
 
+/// Per-file state within a "Sync all".
+enum DlState {
+    /// Not yet requested.
+    Pending,
+    /// Requested; `Instant` is a backstop deadline (give up if exceeded).
+    InFlight(std::time::Instant),
+    /// Now held locally.
+    Done,
+    /// No online holder (peer offline/unreachable) — skipped; retried if a holder
+    /// comes back during this run.
+    Unavailable,
+}
+
 /// Tracks a "Sync all" download of every file under a folder. Whole-file
-/// transfers are atomic, so this works at file granularity: completed files are
-/// kept, cancel stops requesting more (in-flight ones finish), and re-running
-/// resumes by downloading whatever is still missing.
+/// transfers are atomic, so this is file-granular: completed files are kept;
+/// files whose holders are offline are skipped (not blocking the rest); a holder
+/// dropping mid-download flips its file to Unavailable (no infinite wait);
+/// re-running resumes whatever is still missing.
 struct SyncAll {
     folder: String,
-    /// All file paths that needed downloading when started.
-    targets: Vec<String>,
-    /// Index of the next target to request.
-    next: usize,
-    /// How many requests we've issued so far.
-    requested: usize,
+    items: Vec<(String, DlState)>,
 }
 
 impl GuiApp {
@@ -68,7 +77,7 @@ impl GuiApp {
         }
     }
 
-    /// Start a "Sync all": queue every not-yet-local File-lane item under `folder`.
+    /// Start a "Sync all": collect every not-yet-local File-lane item under `folder`.
     fn begin_sync_all(&mut self, folder: String, entries: &[crate::catalog::CatalogEntry]) {
         use crate::catalog::FileLocation;
         let prefix = if folder.is_empty() {
@@ -76,29 +85,35 @@ impl GuiApp {
         } else {
             format!("{folder}/")
         };
-        let targets: Vec<String> = entries
+        let items: Vec<(String, DlState)> = entries
             .iter()
             .filter(|e| prefix.is_empty() || e.path.starts_with(&prefix))
             .filter(|e| crate::routing::lane_for(&e.path) == crate::routing::Lane::File)
             .filter(|e| matches!(e.location, FileLocation::Remote { .. }))
-            .map(|e| e.path.clone())
+            .map(|e| (e.path.clone(), DlState::Pending))
             .collect();
-        if !targets.is_empty() {
-            self.syncing = Some(SyncAll {
-                folder,
-                targets,
-                next: 0,
-                requested: 0,
-            });
+        if !items.is_empty() {
+            self.syncing = Some(SyncAll { folder, items });
         }
     }
 
-    /// Drive the in-progress Sync all: throttle requests, show progress, handle
-    /// cancel. Progress is read from the catalog (files that became local).
-    fn drive_sync_all(&mut self, ctx: &egui::Context, entries: &[crate::catalog::CatalogEntry]) {
+    /// Drive the in-progress Sync all. Each frame we re-check, per file, whether a
+    /// holder is online; only fetchable files are requested. A holder going
+    /// offline (detected by the heartbeat removing it from the peer set) flips its
+    /// file to Unavailable instead of waiting forever; a generous backstop deadline
+    /// catches silent stalls. Finishes when nothing is left in flight, showing a
+    /// downloaded/skipped summary.
+    fn drive_sync_all(
+        &mut self,
+        ctx: &egui::Context,
+        entries: &[crate::catalog::CatalogEntry],
+        online_peers: &std::collections::HashSet<String>,
+    ) {
         use crate::catalog::FileLocation;
         const MAX_INFLIGHT: usize = 6;
+        const BACKSTOP: std::time::Duration = std::time::Duration::from_secs(60);
         let tx = self.bridge.commands_tx.clone();
+        let now = std::time::Instant::now();
         let finished = {
             let Some(sa) = &mut self.syncing else { return };
             let is_local = |p: &str| {
@@ -107,14 +122,73 @@ impl GuiApp {
                         && matches!(e.location, FileLocation::Local | FileLocation::Both { .. })
                 })
             };
-            let total = sa.targets.len();
-            let done = sa.targets.iter().filter(|p| is_local(p)).count();
-            while sa.next < sa.targets.len() && sa.requested.saturating_sub(done) < MAX_INFLIGHT {
-                let _ = tx.send(GuiCommand::Download(sa.targets[sa.next].clone()));
-                sa.next += 1;
-                sa.requested += 1;
+            // A file is fetchable iff some node that holds it is currently online.
+            let holder_online = |p: &str| {
+                entries.iter().any(|e| {
+                    e.path == p
+                        && match &e.location {
+                            FileLocation::Remote { owners } | FileLocation::Both { owners } => {
+                                owners.iter().any(|o| online_peers.contains(&o.node_id))
+                            }
+                            FileLocation::Local => false,
+                        }
+                })
+            };
+
+            // 1) Update each file's state from current reality.
+            for (path, st) in sa.items.iter_mut() {
+                if is_local(path) {
+                    *st = DlState::Done;
+                    continue;
+                }
+                match st {
+                    DlState::Done => *st = DlState::Pending, // dropped locally again → retry
+                    DlState::Unavailable => {
+                        if holder_online(path) {
+                            *st = DlState::Pending; // a holder came back
+                        }
+                    }
+                    DlState::InFlight(deadline) => {
+                        if !holder_online(path) || now >= *deadline {
+                            // holder dropped mid-download, or stalled too long
+                            *st = DlState::Unavailable;
+                        }
+                    }
+                    DlState::Pending => {}
+                }
             }
-            let mut cancel = false;
+
+            // 2) Issue requests for pending+fetchable files, up to MAX_INFLIGHT.
+            let mut inflight = sa
+                .items
+                .iter()
+                .filter(|(_, s)| matches!(s, DlState::InFlight(_)))
+                .count();
+            for (path, st) in sa.items.iter_mut() {
+                if !matches!(st, DlState::Pending) {
+                    continue;
+                }
+                if !holder_online(path) {
+                    *st = DlState::Unavailable;
+                } else if inflight < MAX_INFLIGHT {
+                    let _ = tx.send(GuiCommand::Download(path.clone()));
+                    *st = DlState::InFlight(now + BACKSTOP);
+                    inflight += 1;
+                }
+            }
+
+            // 3) Stats + window.
+            let total = sa.items.len();
+            let done = sa.items.iter().filter(|(_, s)| matches!(s, DlState::Done)).count();
+            let unavail = sa
+                .items
+                .iter()
+                .filter(|(_, s)| matches!(s, DlState::Unavailable))
+                .count();
+            let active = total - done - unavail; // Pending or InFlight
+            let complete = active == 0;
+
+            let mut close = false;
             egui::Window::new("⬇ Sync all")
                 .collapsible(false)
                 .resizable(false)
@@ -126,22 +200,35 @@ impl GuiApp {
                     ));
                     let frac = if total == 0 { 1.0 } else { done as f32 / total as f32 };
                     ui.add(egui::ProgressBar::new(frac).text(format!("{done}/{total}")));
-                    if done < total {
-                        ui.weak("Downloads in progress need an online holder for each file.");
+                    if unavail > 0 {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 150, 60),
+                            format!("⚠ {unavail} skipped — holder offline/unreachable"),
+                        );
                     }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
+                    if complete {
+                        let msg = if unavail == 0 {
+                            "Done.".to_string()
+                        } else {
+                            format!("Done — {done} downloaded, {unavail} skipped (re-run when peers are back).")
+                        };
+                        ui.label(msg);
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    } else if ui.button("Cancel").clicked() {
+                        close = true;
                     }
                 });
-            // Cancel closes immediately: completed files are kept; any still-in-
-            // flight transfers are abandoned (if they arrive they just land locally,
-            // which is harmless). Re-running Sync all resumes the rest.
-            done >= total || cancel
+            // All done with nothing skipped → auto-close. Otherwise wait for the
+            // user to acknowledge the summary (or Cancel mid-run) — closing keeps
+            // completed files; re-running resumes the rest.
+            close || (complete && unavail == 0)
         };
         if finished {
             self.syncing = None;
         } else {
-            ctx.request_repaint_after(std::time::Duration::from_millis(300));
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
     }
 
@@ -319,6 +406,8 @@ impl eframe::App for GuiApp {
 
         let peers = self.bridge.registry.peer_list();
         let entries = self.bridge.catalog.snapshot();
+        let online_peers: std::collections::HashSet<String> =
+            peers.iter().map(|p| p.remote_id.clone()).collect();
         let root_display = self.bridge.root.display().to_string();
 
         // Top panel
@@ -489,8 +578,6 @@ impl eframe::App for GuiApp {
 
         // Central panel: file browser
         egui::CentralPanel::default().show(ctx, |ui| {
-            let online_peers: std::collections::HashSet<String> =
-                peers.iter().map(|p| p.remote_id.clone()).collect();
             let mut start_sync_all: Option<String> = None;
             file_browser::file_browser_panel(
                 ui,
@@ -552,7 +639,7 @@ impl eframe::App for GuiApp {
 
         // "Sync all" progress (downloads a whole folder; cancellable).
         if self.syncing.is_some() {
-            self.drive_sync_all(ctx, &entries);
+            self.drive_sync_all(ctx, &entries, &online_peers);
         }
 
         // Drop overlay
