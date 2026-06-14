@@ -49,7 +49,6 @@ struct SyncAll {
     next: usize,
     /// How many requests we've issued so far.
     requested: usize,
-    cancelled: bool,
 }
 
 impl GuiApp {
@@ -90,7 +89,6 @@ impl GuiApp {
                 targets,
                 next: 0,
                 requested: 0,
-                cancelled: false,
             });
         }
     }
@@ -111,16 +109,11 @@ impl GuiApp {
             };
             let total = sa.targets.len();
             let done = sa.targets.iter().filter(|p| is_local(p)).count();
-            if !sa.cancelled {
-                while sa.next < sa.targets.len()
-                    && sa.requested.saturating_sub(done) < MAX_INFLIGHT
-                {
-                    let _ = tx.send(GuiCommand::Download(sa.targets[sa.next].clone()));
-                    sa.next += 1;
-                    sa.requested += 1;
-                }
+            while sa.next < sa.targets.len() && sa.requested.saturating_sub(done) < MAX_INFLIGHT {
+                let _ = tx.send(GuiCommand::Download(sa.targets[sa.next].clone()));
+                sa.next += 1;
+                sa.requested += 1;
             }
-            let in_flight = sa.requested.saturating_sub(done);
             let mut cancel = false;
             egui::Window::new("⬇ Sync all")
                 .collapsible(false)
@@ -133,16 +126,17 @@ impl GuiApp {
                     ));
                     let frac = if total == 0 { 1.0 } else { done as f32 / total as f32 };
                     ui.add(egui::ProgressBar::new(frac).text(format!("{done}/{total}")));
-                    if sa.cancelled {
-                        ui.weak("Cancelling — finishing in-flight downloads…");
-                    } else if ui.button("Cancel").clicked() {
+                    if done < total {
+                        ui.weak("Downloads in progress need an online holder for each file.");
+                    }
+                    if ui.button("Cancel").clicked() {
                         cancel = true;
                     }
                 });
-            if cancel {
-                sa.cancelled = true;
-            }
-            done >= total || (sa.cancelled && in_flight == 0)
+            // Cancel closes immediately: completed files are kept; any still-in-
+            // flight transfers are abandoned (if they arrive they just land locally,
+            // which is harmless). Re-running Sync all resumes the rest.
+            done >= total || cancel
         };
         if finished {
             self.syncing = None;
