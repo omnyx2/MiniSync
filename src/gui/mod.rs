@@ -33,6 +33,23 @@ pub struct GuiApp {
     pending_confirm: Option<PendingConfirm>,
     /// Whether the change-history window is open.
     show_history: bool,
+    /// An in-progress "Sync all" (download every file under a folder).
+    syncing: Option<SyncAll>,
+}
+
+/// Tracks a "Sync all" download of every file under a folder. Whole-file
+/// transfers are atomic, so this works at file granularity: completed files are
+/// kept, cancel stops requesting more (in-flight ones finish), and re-running
+/// resumes by downloading whatever is still missing.
+struct SyncAll {
+    folder: String,
+    /// All file paths that needed downloading when started.
+    targets: Vec<String>,
+    /// Index of the next target to request.
+    next: usize,
+    /// How many requests we've issued so far.
+    requested: usize,
+    cancelled: bool,
 }
 
 impl GuiApp {
@@ -48,6 +65,89 @@ impl GuiApp {
             show_conflicts: false,
             pending_confirm: None,
             show_history: false,
+            syncing: None,
+        }
+    }
+
+    /// Start a "Sync all": queue every not-yet-local File-lane item under `folder`.
+    fn begin_sync_all(&mut self, folder: String, entries: &[crate::catalog::CatalogEntry]) {
+        use crate::catalog::FileLocation;
+        let prefix = if folder.is_empty() {
+            String::new()
+        } else {
+            format!("{folder}/")
+        };
+        let targets: Vec<String> = entries
+            .iter()
+            .filter(|e| prefix.is_empty() || e.path.starts_with(&prefix))
+            .filter(|e| crate::routing::lane_for(&e.path) == crate::routing::Lane::File)
+            .filter(|e| matches!(e.location, FileLocation::Remote { .. }))
+            .map(|e| e.path.clone())
+            .collect();
+        if !targets.is_empty() {
+            self.syncing = Some(SyncAll {
+                folder,
+                targets,
+                next: 0,
+                requested: 0,
+                cancelled: false,
+            });
+        }
+    }
+
+    /// Drive the in-progress Sync all: throttle requests, show progress, handle
+    /// cancel. Progress is read from the catalog (files that became local).
+    fn drive_sync_all(&mut self, ctx: &egui::Context, entries: &[crate::catalog::CatalogEntry]) {
+        use crate::catalog::FileLocation;
+        const MAX_INFLIGHT: usize = 6;
+        let tx = self.bridge.commands_tx.clone();
+        let finished = {
+            let Some(sa) = &mut self.syncing else { return };
+            let is_local = |p: &str| {
+                entries.iter().any(|e| {
+                    e.path == p
+                        && matches!(e.location, FileLocation::Local | FileLocation::Both { .. })
+                })
+            };
+            let total = sa.targets.len();
+            let done = sa.targets.iter().filter(|p| is_local(p)).count();
+            if !sa.cancelled {
+                while sa.next < sa.targets.len()
+                    && sa.requested.saturating_sub(done) < MAX_INFLIGHT
+                {
+                    let _ = tx.send(GuiCommand::Download(sa.targets[sa.next].clone()));
+                    sa.next += 1;
+                    sa.requested += 1;
+                }
+            }
+            let in_flight = sa.requested.saturating_sub(done);
+            let mut cancel = false;
+            egui::Window::new("⬇ Sync all")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Folder: {}",
+                        if sa.folder.is_empty() { "(root)" } else { sa.folder.as_str() }
+                    ));
+                    let frac = if total == 0 { 1.0 } else { done as f32 / total as f32 };
+                    ui.add(egui::ProgressBar::new(frac).text(format!("{done}/{total}")));
+                    if sa.cancelled {
+                        ui.weak("Cancelling — finishing in-flight downloads…");
+                    } else if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            if cancel {
+                sa.cancelled = true;
+            }
+            done >= total || (sa.cancelled && in_flight == 0)
+        };
+        if finished {
+            self.syncing = None;
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(300));
         }
     }
 
@@ -397,6 +497,7 @@ impl eframe::App for GuiApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let online_peers: std::collections::HashSet<String> =
                 peers.iter().map(|p| p.remote_id.clone()).collect();
+            let mut start_sync_all: Option<String> = None;
             file_browser::file_browser_panel(
                 ui,
                 &entries,
@@ -406,7 +507,11 @@ impl eframe::App for GuiApp {
                 &online_peers,
                 &mut self.current_dir,
                 &mut self.pending_confirm,
+                &mut start_sync_all,
             );
+            if let Some(folder) = start_sync_all {
+                self.begin_sync_all(folder, &entries);
+            }
         });
 
         // Destructive-delete confirmation modal.
@@ -449,6 +554,11 @@ impl eframe::App for GuiApp {
                 Some(false) => self.pending_confirm = None,
                 None => {}
             }
+        }
+
+        // "Sync all" progress (downloads a whole folder; cancellable).
+        if self.syncing.is_some() {
+            self.drive_sync_all(ctx, &entries);
         }
 
         // Drop overlay

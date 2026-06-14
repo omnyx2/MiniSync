@@ -44,6 +44,7 @@ pub fn file_browser_panel(
     online_peers: &HashSet<String>,
     current_dir: &mut String,
     pending: &mut Option<PendingConfirm>,
+    start_sync_all: &mut Option<String>,
 ) {
     ui.heading("File Browser");
 
@@ -141,28 +142,39 @@ pub fn file_browser_panel(
 
                 // Folders first, clickable to descend.
                 for folder in folders.values() {
+                    let folder_path = if current_dir.is_empty() {
+                        folder.name.clone()
+                    } else {
+                        format!("{current_dir}/{}", folder.name)
+                    };
                     if ui
                         .button(format!("📁 {}", folder.name))
                         .on_hover_text("Open folder")
                         .clicked()
                     {
-                        *current_dir = if current_dir.is_empty() {
-                            folder.name.clone()
-                        } else {
-                            format!("{current_dir}/{}", folder.name)
-                        };
+                        *current_dir = folder_path.clone();
                     }
                     ui.label(format_size(folder.total_size));
                     ui.label(format!("{} item(s)", folder.file_count));
                     ui.label(""); // Available: n/a for folders
-                    // Sync: how many sub-items are held here. Green when all synced.
+                    // Sync: held/total + a right-aligned "Sync all" when incomplete.
                     let all = folder.file_count > 0 && folder.held_count == folder.file_count;
-                    let txt = format!("{}/{} synced", folder.held_count, folder.file_count);
-                    if all {
-                        ui.colored_label(egui::Color32::from_rgb(60, 160, 60), txt);
-                    } else {
-                        ui.weak(txt);
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !all
+                            && ui
+                                .button("⬇ Sync all")
+                                .on_hover_text("Download every file in this folder onto this device")
+                                .clicked()
+                        {
+                            *start_sync_all = Some(folder_path.clone());
+                        }
+                        let txt = format!("{}/{}", folder.held_count, folder.file_count);
+                        if all {
+                            ui.colored_label(egui::Color32::from_rgb(60, 160, 60), format!("{txt} ✓"));
+                        } else {
+                            ui.weak(txt);
+                        }
+                    });
                     ui.label(""); // no folder-level delete (avoid mass deletion)
                     ui.end_row();
                 }
