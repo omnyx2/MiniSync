@@ -50,6 +50,37 @@ pub fn is_minisync_internal(rel_path: &str) -> bool {
         || normalized.starts_with(&format!("{MINISYNC_DIR}/"))
 }
 
+/// **보안 게이트:** 피어가 보낸 상대 경로를 파일시스템에 쓰기 전에 검증한다.
+///
+/// 악의적 피어가 동기화 루트 **밖**의 파일을 읽기/쓰기/삭제하지 못하도록 막는다.
+/// 거부 대상: 절대경로, `..` 상위 탈출, Windows 드라이브/UNC 프리픽스, 빈 경로,
+/// 그리고 `.minisync/` 내부(메타데이터 오염 방지).
+///
+/// 순수 lexical 검사라 파일시스템을 건드리지 않는다(심링크/TOCTOU 창 없음).
+/// 양쪽 구분자(`/`, `\`)를 모두 분리자로 취급하므로, Unix에서도 Windows식
+/// `..\..\x` 탈출을 잡아낸다.
+pub fn is_safe_rel(rel_path: &str) -> bool {
+    use std::path::Component;
+    if rel_path.is_empty() {
+        return false;
+    }
+    // 호스트 OS와 무관하게 두 구분자를 통일해서 컴포넌트로 분해한다.
+    let unified = rel_path.replace('\\', "/");
+    // Windows 드라이브 레터(`C:...`)는 Unix에서 Prefix로 인식되지 않으므로 명시 검사.
+    let b = unified.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return false;
+    }
+    for comp in Path::new(&unified).components() {
+        match comp {
+            Component::Normal(_) | Component::CurDir => {}
+            // 루트(`/`), 드라이브/UNC 프리픽스, `..` → 루트 탈출 가능 → 거부.
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => return false,
+        }
+    }
+    !is_minisync_internal(&unified)
+}
+
 /// `.minisync/crdt/<rel>.amrg` 경로 (Automerge 문서 저장 위치).
 pub fn crdt_state_path(root: &Path, rel: &str) -> PathBuf {
     root.join(MINISYNC_DIR).join("crdt").join(format!("{rel}.amrg"))
@@ -105,6 +136,36 @@ mod tests {
         assert!(!is_minisync_internal("notes.txt"));
         assert!(!is_minisync_internal("dir/.minisync_not"));
         assert!(!is_minisync_internal(".minisyncx/foo"));
+    }
+
+    #[test]
+    fn safe_rel_accepts_normal_paths() {
+        assert!(is_safe_rel("notes.txt"));
+        assert!(is_safe_rel("dir/sub/file.pdf"));
+        assert!(is_safe_rel("./a/b.txt")); // CurDir 컴포넌트 허용
+        assert!(is_safe_rel("무제 폴더/파일.txt"));
+        assert!(is_safe_rel("dir/..name/ok.txt")); // ".." 가 파일명 일부면 OK
+    }
+
+    #[test]
+    fn safe_rel_rejects_traversal_and_absolute() {
+        // 상위 탈출
+        assert!(!is_safe_rel("../etc/passwd"));
+        assert!(!is_safe_rel("a/../../b"));
+        assert!(!is_safe_rel("foo/.."));
+        // Windows식 역슬래시 탈출 (Unix에서도 잡아야 함)
+        assert!(!is_safe_rel("..\\..\\windows\\system32"));
+        assert!(!is_safe_rel("a\\..\\..\\b"));
+        // 절대경로 (Unix)
+        assert!(!is_safe_rel("/etc/passwd"));
+        assert!(!is_safe_rel("/Users/victim/.ssh/authorized_keys"));
+        // Windows 드라이브/UNC 프리픽스
+        assert!(!is_safe_rel("C:\\Windows\\System32\\drivers\\etc\\hosts"));
+        assert!(!is_safe_rel("\\\\server\\share\\x"));
+        // 빈 경로
+        assert!(!is_safe_rel(""));
+        // 내부 메타데이터 디렉터리
+        assert!(!is_safe_rel(".minisync/versions/x.vv"));
     }
 
     #[test]

@@ -50,6 +50,28 @@ pub fn handle_message(
         node_id: remote_id.to_string(),
         node_name: remote_name.to_string(),
     };
+
+    // ── SECURITY: path-traversal gate ────────────────────────────────────────
+    // Every message that carries a single peer-supplied path which we later feed
+    // to the filesystem (read/write/delete) is validated here, before dispatch.
+    // A path that escapes the sync root (absolute, `..`, drive prefix) or targets
+    // our internal metadata is rejected outright. Multi-path messages (Index,
+    // RefIndex) are filtered inside their own handlers.
+    let suspect_path = match &msg {
+        Message::File { entry, .. } => Some(entry.path.as_str()),
+        Message::Request(p) | Message::Delete(p) | Message::DownloadRequest(p) => Some(p.as_str()),
+        Message::CrdtSync { path, .. } | Message::CrdtChanges { path, .. } => Some(path.as_str()),
+        _ => None,
+    };
+    if let Some(p) = suspect_path {
+        if !routing::is_safe_rel(p) {
+            eprintln!(
+                "[security] rejected unsafe path {p:?} from {remote_name} ({remote_id})"
+            );
+            return Ok(());
+        }
+    }
+
     match msg {
         Message::Hello { .. } => {} // already handled
         Message::Index(entries) => {
@@ -149,6 +171,13 @@ fn handle_index(
 ) -> Result<()> {
     let local = build_index(root)?;
     let cfg = config.read().unwrap().clone();
+
+    // SECURITY: drop any entry whose path would escape the sync root before it
+    // can pollute the catalog or drive a Request/RefIndex for a traversal path.
+    let entries: Vec<FileEntry> = entries
+        .into_iter()
+        .filter(|e| routing::is_safe_rel(&e.path))
+        .collect();
 
     for e in &entries {
         // The sender has this file locally → it's a holder. Learn the origin too.
@@ -436,6 +465,12 @@ fn handle_ref_index(
     engine: Option<&SyncEngine>,
 ) -> Result<()> {
     for re in ref_entries {
+        // SECURITY: a traversal path here would make entry_for() read outside the
+        // sync root and could trigger a DownloadRequest for it — drop it.
+        if !routing::is_safe_rel(&re.path) {
+            eprintln!("[security] rejected unsafe ref path {:?}", re.path);
+            continue;
+        }
         println!(
             "[sync] received ref metadata: {} ({} bytes) from {} ({})",
             re.path, re.size, re.owner_name, re.owner_id
