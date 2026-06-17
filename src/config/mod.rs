@@ -2,12 +2,13 @@
 //!
 //! Configuration is stored in `.minisync/config.toml` within the sync root.
 //!
+//! The default mode is `reference` (selective sync: peers see each other's files
+//! as metadata-only references and download on demand). Per-pattern rules can opt
+//! specific paths into `full_copy` (mirror the bytes automatically).
+//!
 //! Example:
 //! ```toml
-//! default_mode = "full_copy"
-//! [[rules]]
-//! pattern = "*.pdf"
-//! mode = "reference"
+//! default_mode = "reference"
 //! [[rules]]
 //! pattern = "src/**"
 //! mode = "full_copy"
