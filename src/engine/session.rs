@@ -244,6 +244,14 @@ fn pump_loop(
         // (e) 완성된 프레임 파싱·디스패치
         while inbuf.len() >= 4 {
             let len = u32::from_be_bytes([inbuf[0], inbuf[1], inbuf[2], inbuf[3]]) as usize;
+            // 상한 초과 프레임은 inbuf가 그 크기까지 무한정 부풀기 전에 즉시 차단
+            // (메모리 폭탄 방지). 프로토콜 위반이므로 세션을 끊는다.
+            if len > crate::protocol::MAX_MSG_SIZE {
+                anyhow::bail!(
+                    "peer {remote_name} ({remote_id}) sent oversized frame: {len} bytes (max {})",
+                    crate::protocol::MAX_MSG_SIZE
+                );
+            }
             if inbuf.len() < 4 + len {
                 break; // 불완전 — 더 받을 때까지 대기
             }

@@ -50,6 +50,14 @@ pub enum Message {
     Ping,
 }
 
+/// Maximum accepted frame size (the bincode payload after the 4-byte length
+/// prefix). A peer announces a `u32` length, so without a cap a single frame
+/// could force a ~4 GiB allocation (`vec![0u8; len]`) — a trivial memory-bomb
+/// DoS. Because files transfer whole (`Message::File { contents }`), this also
+/// acts as the effective max syncable file size; bump it if you sync larger
+/// files (chunked transfer would remove the ceiling — see scaling plan).
+pub const MAX_MSG_SIZE: usize = 1 << 30; // 1 GiB
+
 /// Metadata for a reference-mode file (no contents transferred).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefEntry {
@@ -90,7 +98,36 @@ pub fn recv_msg<R: Read>(r: &mut R) -> Result<Option<Message>> {
         Err(e) => return Err(e.into()),
     }
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_MSG_SIZE {
+        anyhow::bail!("frame too large: {len} bytes (max {MAX_MSG_SIZE})");
+    }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
     Ok(Some(bincode::deserialize(&buf)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn recv_rejects_oversized_frame_without_allocating() {
+        // A length prefix claiming MAX_MSG_SIZE + 1, then no body. recv_msg must
+        // bail on the length check before it ever tries to allocate the buffer.
+        let bogus_len = (MAX_MSG_SIZE as u64 + 1).min(u32::MAX as u64) as u32;
+        let header = bogus_len.to_be_bytes();
+        let mut cur = Cursor::new(header.to_vec());
+        let err = recv_msg(&mut cur).unwrap_err();
+        assert!(err.to_string().contains("frame too large"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_small_message_ok() {
+        let msg = Message::Ping;
+        let bytes = serialize_msg(&msg).unwrap();
+        let mut cur = Cursor::new(bytes);
+        let got = recv_msg(&mut cur).unwrap();
+        assert!(matches!(got, Some(Message::Ping)));
+    }
 }
