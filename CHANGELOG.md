@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.4
+- **Security — path-traversal sandbox** — file paths in peer messages are now
+  validated lexically (`routing::is_safe_rel`); a compromised mesh peer can no
+  longer read/write/delete files outside the shared folder via absolute paths or
+  `..` segments.
+- **Security — incoming frame size cap** — `protocol::MAX_MSG_SIZE` (1 GiB) rejects
+  oversized frames before allocation, blocking a per-frame memory-bomb DoS.
+- No wire-format change; a mixed mesh (older nodes) stays compatible.
+
 ## v0.1.3
 - **Real-time peer tracking** — application heartbeat (4s ping / 12s timeout) reaps
   dead/half-open peers quickly; peer list & availability stay accurate.
